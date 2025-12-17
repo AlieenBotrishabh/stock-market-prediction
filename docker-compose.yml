@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: stock-market-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: stock-market
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - stock-network
+
+  backend:
+    build: ./backend
+    container_name: stock-market-api
+    ports:
+      - "5000:5000"
+    environment:
+      MONGO_URI: mongodb://root:password@mongodb:27017/stock-market
+      PORT: 5000
+      NODE_ENV: development
+    depends_on:
+      - mongodb
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - stock-network
+    command: npm run dev
+
+  frontend:
+    build: ./frontend
+    container_name: stock-market-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - stock-network
+    command: npm run dev
+
+volumes:
+  mongodb_data:
+
+networks:
+  stock-network:
+    driver: bridge

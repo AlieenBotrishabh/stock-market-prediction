@@ -1,0 +1,24 @@
+{
+  "name": "stock-market-prediction",
+  "version": "1.0.0",
+  "description": "Real-time stock market prediction app with Indian API integration",
+  "private": true,
+  "scripts": {
+    "install-all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "dev": "concurrently \"cd backend && npm run dev\" \"cd frontend && npm run dev\"",
+    "build": "cd frontend && npm run build && cd ../backend && npm run build",
+    "start": "cd backend && npm start"
+  },
+  "keywords": [
+    "stock",
+    "market",
+    "prediction",
+    "trading",
+    "finance"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^7.6.0"
+  }
+}
