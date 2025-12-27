@@ -72,7 +72,33 @@ stock-market-prediction/
 │   ├── server.js
 │   ├── package.json
 │   └── .env.example
+│
+├── ml-pipeline/
+│   ├── api_client.py        # IndianAPI client with rate limiting
+│   ├── data_processor.py    # Feature engineering + sequences
+│   ├── model.py             # LSTM model
+│   ├── main.py              # CLI: collect/process/train
+│   ├── predict.py           # Serve predictions from trained models
+│   ├── requirements.txt     # Python deps
+│   ├── data/                # Raw + processed datasets
+│   ├── models/              # Saved model checkpoints
+│   └── logs/                # Request + training logs
 ```
+
+## 📦 Data Pipelines & ML
+
+- **Purpose**: End-to-end data collection → feature engineering → LSTM training for price prediction using IndianAPI. Full docs in [ml-pipeline/README.md](ml-pipeline/README.md).
+- **Data locations**: Raw JSON in [ml-pipeline/data/raw](ml-pipeline/data/raw), processed CSV in [ml-pipeline/data/processed](ml-pipeline/data/processed), trained models in [ml-pipeline/models](ml-pipeline/models), logs in [ml-pipeline/logs](ml-pipeline/logs).
+- **Env**: Python 3.8+, set `INDIANAPI_KEY` (same key as backend). Optional: update endpoints/symbol format in [ml-pipeline/config.py](ml-pipeline/config.py).
+- **Core commands** (run inside [ml-pipeline](ml-pipeline)):
+  - `python main.py --status` — show remaining daily/monthly quota (no API calls).
+  - `python main.py --collect` — fetch historical OHLCV for all symbols (1 API call per symbol; writes to data/raw).
+  - `python main.py --process` — compute indicators (SMA, EMA, RSI, ROC, volatility) and save CSVs (no API calls).
+  - `python main.py --train` — train LSTM models on processed data and save to models/ (no API calls).
+  - `python main.py --full` — collect → process → train in one go.
+- **Rate limits**: Client enforces 10 requests/day (buffer under 500/month). All calls logged in [ml-pipeline/logs/request_log.json](ml-pipeline/logs/request_log.json).
+- **Prediction CLI**: `python predict.py` to load saved models and print next-day forecasts per symbol; sample usage in [ml-pipeline/example_predict.py](ml-pipeline/example_predict.py).
+- **Integration check**: [verify_integration.py](verify_integration.py) pings backend/front-end and the prediction endpoint to confirm wiring.
 
 ## 🚀 Getting Started
 
