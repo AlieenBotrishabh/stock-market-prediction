@@ -7,6 +7,7 @@ import NewsPage from './pages/NewsPage';
 import IpoPage from './pages/IpoPage';
 import MutualFundsPage from './pages/MutualFundsPage';
 import AnnouncementsPage from './pages/AnnouncementsPage';
+import Predictions from './pages/Predictions';
 import './index.css';
 
 function App() {
@@ -20,6 +21,7 @@ function App() {
         <Route path="/ipo" element={<IpoPage />} />
         <Route path="/mutual-funds" element={<MutualFundsPage />} />
         <Route path="/announcements" element={<AnnouncementsPage />} />
+        <Route path="/predictions" element={<Predictions />} />
       </Routes>
     </Router>
   );

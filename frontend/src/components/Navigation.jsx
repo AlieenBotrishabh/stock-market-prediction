@@ -1,5 +1,5 @@
 import React from 'react';
-import { Menu, Home, BarChart3, Heart, TrendingUp, Newspaper, DollarSign, Briefcase, Bell } from 'lucide-react';
+import { Menu, Home, BarChart3, Heart, TrendingUp, Newspaper, DollarSign, Briefcase, Bell, Zap } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const Navigation = ({ isOpen, setIsOpen }) => {
@@ -31,6 +31,13 @@ const Navigation = ({ isOpen, setIsOpen }) => {
             >
               <TrendingUp size={18} />
               <span>Trending</span>
+            </Link>
+            <Link
+              to="/predictions"
+              className="text-text-secondary hover:text-accent-green transition flex items-center gap-2 whitespace-nowrap"
+            >
+              <Zap size={18} />
+              <span>Predictions</span>
             </Link>
             <Link
               to="/news"
@@ -87,6 +94,13 @@ const Navigation = ({ isOpen, setIsOpen }) => {
               onClick={() => setIsOpen(false)}
             >
               Trending Stocks
+            </Link>
+            <Link
+              to="/predictions"
+              className="block px-4 py-2 text-text-secondary hover:text-accent-green transition rounded"
+              onClick={() => setIsOpen(false)}
+            >
+              AI Predictions
             </Link>
             <Link
               to="/news"

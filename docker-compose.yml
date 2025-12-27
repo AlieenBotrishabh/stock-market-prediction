@@ -6,10 +6,17 @@ services:
     container_name: stock-market-mongodb
     ports:
       - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: stock-market
     volumes:
       - mongodb_data:/data/db
     networks:
       - stock-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     build: ./backend
@@ -20,14 +27,19 @@ services:
       MONGO_URI: mongodb://mongodb:27017/stock-market
       PORT: 5000
       NODE_ENV: development
+      INDIANAPI_KEY: ${INDIANAPI_KEY:-demo_key}
+      FRONTEND_URL: http://localhost:3000
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
     volumes:
       - ./backend:/app
       - /app/node_modules
+      - ./ml-pipeline:/app/../ml-pipeline
     networks:
       - stock-network
-    command: npm run dev
+    command: npm start
+    restart: unless-stopped
 
   frontend:
     build:
@@ -36,6 +48,8 @@ services:
     container_name: stock-market-frontend
     ports:
       - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:5000/api
     depends_on:
       - backend
     volumes:
@@ -44,6 +58,23 @@ services:
     networks:
       - stock-network
     command: npm run dev
+    restart: unless-stopped
+
+  ml-pipeline:
+    build: ./ml-pipeline
+    container_name: stock-market-ml
+    environment:
+      INDIANAPI_KEY: ${INDIANAPI_KEY:-demo_key}
+    volumes:
+      - ./ml-pipeline/data:/app/data
+      - ./ml-pipeline/models:/app/models
+    networks:
+      - stock-network
+    depends_on:
+      - backend
+    restart: on-failure
+    profiles:
+      - ml
 
 volumes:
   mongodb_data:

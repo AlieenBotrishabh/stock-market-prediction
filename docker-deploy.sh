@@ -1,13 +1,14 @@
 #!/bin/bash
 
-# Docker Deployment Script for Stock Market Prediction App
+# Docker Deployment Script for Stock Market Prediction App with ML Integration
 # Usage: ./docker-deploy.sh [command]
-# Commands: up, down, build, logs, clean, status, restart, shell
+# Commands: up, down, build, logs, clean, status, restart, shell, ml
 
 set -e
 
 PROJECT_NAME="stock-market-prediction"
 COMPOSE_FILE="docker-compose.yml"
+PROD_COMPOSE_FILE="docker-compose.prod.yml"
 
 # Colors for output
 RED='\033[0;31m'

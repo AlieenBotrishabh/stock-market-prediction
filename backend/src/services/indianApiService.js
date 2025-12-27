@@ -17,12 +17,12 @@ const apiClient = axios.create({
 
 // Mock data for fallback
 const mockStocks = [
-  { symbol: 'TCS', company_name: 'Tata Consultancy Services', current_price: 3850.50, change_percent: 2.45, day_high: 3900, day_low: 3800 },
-  { symbol: 'INFY', company_name: 'Infosys Limited', current_price: 1625.75, change_percent: -1.23, day_high: 1680, day_low: 1620 },
-  { symbol: 'HDFC', company_name: 'HDFC Bank Limited', current_price: 1750.25, change_percent: 3.15, day_high: 1800, day_low: 1720 },
-  { symbol: 'RELIANCE', company_name: 'Reliance Industries', current_price: 2845.90, change_percent: 1.75, day_high: 2900, day_low: 2820 },
-  { symbol: 'ICICIBANK', company_name: 'ICICI Bank Limited', current_price: 825.50, change_percent: -0.85, day_high: 850, day_low: 820 },
-  { symbol: 'WIPRO', company_name: 'Wipro Limited', current_price: 450.75, change_percent: 2.30, day_high: 465, day_low: 445 },
+  { symbol: 'TCS', company_name: 'Tata Consultancy Services', current_price: 3850.50, lastPrice: 3850.50, change_percent: 2.45, day_high: 3900, day_low: 3800 },
+  { symbol: 'INFY', company_name: 'Infosys Limited', current_price: 1625.75, lastPrice: 1625.75, change_percent: -1.23, day_high: 1680, day_low: 1620 },
+  { symbol: 'HDFC', company_name: 'HDFC Bank Limited', current_price: 1750.25, lastPrice: 1750.25, change_percent: 3.15, day_high: 1800, day_low: 1720 },
+  { symbol: 'RELIANCE', company_name: 'Reliance Industries', current_price: 1500, lastPrice: 1500, change_percent: 1.75, day_high: 1550, day_low: 1480 },
+  { symbol: 'ICICIBANK', company_name: 'ICICI Bank Limited', current_price: 825.50, lastPrice: 825.50, change_percent: -0.85, day_high: 850, day_low: 820 },
+  { symbol: 'WIPRO', company_name: 'Wipro Limited', current_price: 450.75, lastPrice: 450.75, change_percent: 2.30, day_high: 465, day_low: 445 },
 ];
 
 // Error handler utility with fallback

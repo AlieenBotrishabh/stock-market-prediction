@@ -1,0 +1,170 @@
+# ML Pipeline - 5-Minute Quick Start
+
+## Installation (2 minutes)
+
+```bash
+cd ml-pipeline
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set API key
+export INDIANAPI_KEY="your_key_from_indianapi_com"
+```
+
+## Verify Setup (1 minute)
+
+```bash
+# Check configuration
+python main.py --status
+
+# Expected output:
+# Monthly quota (500 requests):
+#   Used: 0
+#   Remaining: 500
+#
+# Today's quota (10 requests):
+#   Used: 0
+#   Remaining: 10
+```
+
+## Run Full Pipeline (2 minutes)
+
+```bash
+python main.py --full
+```
+
+This will:
+1. **Collect** historical data for 5 symbols (5 API requests)
+2. **Process** data with technical indicators (no API calls)
+3. **Train** LSTM models (no API calls)
+
+## What Gets Created
+
+```
+data/raw/        → TCS_raw.json, HDFC_raw.json, etc. (from API)
+data/processed/  → TCS_processed.csv, HDFC_processed.csv, etc. (with features)
+models/          → TCS.h5, HDFC.h5, etc. (trained LSTM models)
+logs/            → Detailed execution logs
+```
+
+## What You Need to Update
+
+Before running, fill these TODO items in `config.py`:
+
+1. **API Endpoints** (line 35)
+   ```python
+   API_ENDPOINTS = {
+       "historical": "/api/???",  # VERIFY FROM DOCS
+       "quote": "/api/???",
+       "company": "/api/???",
+   }
+   ```
+
+2. **Symbol Format** (line 20)
+   ```python
+   SYMBOLS = [
+       "TCS",  # VERIFY: Is it "TCS" or "TCS.NS"?
+   ]
+   ```
+
+3. **Response Structure** (data_processor.py line 50)
+   - Your API returns JSON, verify structure
+   - Update field names to match
+
+4. **Authentication** (api_client.py line 95)
+   - Verify if using Bearer token, API key param, or other
+
+## Key Concepts
+
+**Rate Limiting:**
+- 500 requests/month quota from IndianAPI
+- Pipeline uses 10/day (conservative)
+- All requests logged to `logs/request_log.json`
+
+**Data Flow:**
+```
+API → Raw JSON → Features → Sequences → LSTM Train → Model
+```
+
+**No API Calls During Training:**
+- Collect data once: 1 request per symbol
+- Process/train unlimited times: 0 API calls
+- Rerun training daily: still 0 API calls (uses saved CSV)
+
+## Commands
+
+```bash
+python main.py --status         # Check quota (0 API calls)
+python main.py --collect        # Collect data (1 per symbol)
+python main.py --process        # Add features (0 API calls)
+python main.py --train          # Train models (0 API calls)
+python main.py --full           # All three (1 per symbol)
+```
+
+## Expected Results
+
+After `--full` completes (5 symbols):
+
+```
+✓ Data collection: 5/5 symbols
+  - TCS, HDFC, RELIANCE, WIPRO, INFY
+  - 5 raw JSON files saved
+
+✓ Data processing: 5/5 symbols
+  - Each with ~15 technical features
+  - 5 CSV files saved
+
+✓ Model training: 5/5 symbols
+  - Test RMSE: ~0.05 - 0.15 (varies by symbol)
+  - Test MAPE: 0.5% - 2% (goal: <1%)
+  - 5 LSTM models saved
+```
+
+## Troubleshooting
+
+| Error | Solution |
+|-------|----------|
+| INDIANAPI_KEY not set | `export INDIANAPI_KEY="..."` |
+| Daily quota exhausted | Wait until tomorrow (resets 00:00 UTC) |
+| No raw data found | Run `python main.py --collect` first |
+| TensorFlow not found | `pip install tensorflow` |
+| Invalid response format | Verify API endpoints in `config.py` |
+
+## Next Steps
+
+1. ✅ Install dependencies
+2. ✅ Update TODO items in `config.py`
+3. ✅ Set INDIANAPI_KEY
+4. ✅ Run `python main.py --status` (verify quota)
+5. ✅ Run `python main.py --full` (full pipeline)
+6. ✅ Check models in `models/` directory
+7. 🔄 Run `python main.py --train` daily (reuse data)
+8. 🔄 Run `python main.py --collect` for fresh data
+
+## File Reference
+
+| File | Purpose |
+|------|---------|
+| `config.py` | Central configuration ⚠️ FILL TODOS |
+| `api_client.py` | API calls + rate limiting |
+| `data_processor.py` | Features + indicators |
+| `model.py` | LSTM training |
+| `main.py` | CLI orchestration |
+| `requirements.txt` | Python dependencies |
+| `README.md` | Detailed documentation |
+| `IMPLEMENTATION_GUIDE.md` | Deep dive guide |
+
+## Key Features
+
+✅ **Efficient quota management** - 10 requests/day out of 500/month  
+✅ **Local data storage** - Raw JSON + processed CSV saved  
+✅ **Technical indicators** - SMA, EMA, RSI, volatility, ROC  
+✅ **LSTM model** - 2-layer, 64 units, dropout regularization  
+✅ **Comprehensive logging** - All actions logged to prevent errors  
+✅ **Modular code** - Easy to extend with new symbols/features  
+✅ **TODO markers** - Clear points where API-specific code needed  
+
+---
+
+**Ready to go!** Run `python main.py --full` to start.

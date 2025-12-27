@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: stock-market-mongodb-prod
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-secure_password}
+      MONGO_INITDB_DATABASE: stock-market
+    volumes:
+      - mongodb_prod_data:/data/db
+    networks:
+      - stock-network-prod
+    restart: always
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stock-market-api-prod
+    ports:
+      - "5000:5000"
+    environment:
+      MONGO_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-secure_password}@mongodb:27017/stock-market
+      PORT: 5000
+      NODE_ENV: production
+      INDIANAPI_KEY: ${INDIANAPI_KEY}
+      FRONTEND_URL: ${FRONTEND_URL:-https://yourdomain.com}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - ./ml-pipeline:/app/../ml-pipeline
+    networks:
+      - stock-network-prod
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    container_name: stock-market-frontend-prod
+    ports:
+      - "80:3000"
+    environment:
+      VITE_API_URL: ${API_URL:-/api}
+    depends_on:
+      - backend
+    networks:
+      - stock-network-prod
+    restart: always
+
+  ml-pipeline:
+    build: ./ml-pipeline
+    container_name: stock-market-ml-prod
+    environment:
+      INDIANAPI_KEY: ${INDIANAPI_KEY}
+    volumes:
+      - ./ml-pipeline/data:/app/data
+      - ./ml-pipeline/models:/app/models
+    networks:
+      - stock-network-prod
+    restart: on-failure
+    profiles:
+      - ml
+
+volumes:
+  mongodb_prod_data:
+
+networks:
+  stock-network-prod:
+    driver: bridge

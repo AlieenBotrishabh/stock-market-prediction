@@ -1,18 +1,22 @@
-# Docker Deployment Script for Stock Market Prediction App
-# Usage: .\docker-deploy.ps1 -Command <command>
-# Commands: up, down, build, logs, clean, status, restart, shell
+# Docker Deployment Script for Stock Market Prediction App with ML Integration
+# Usage: .\docker-deploy.ps1 -Command <command> [-Environment <env>]
+# Commands: up, down, build, logs, clean, status, restart, shell, ml, help
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet('up', 'down', 'build', 'logs', 'clean', 'status', 'restart', 'shell', 'health', 'help')]
+    [ValidateSet('up', 'down', 'build', 'logs', 'clean', 'status', 'restart', 'shell', 'health', 'ml', 'help')]
     [string]$Command = 'help',
     
     [Parameter(Position=1)]
+    [ValidateSet('dev', 'prod')]
+    [string]$Environment = 'dev',
+    
+    [Parameter()]
     [string]$Service
 )
 
 $ProjectName = "stock-market-prediction"
-$ComposeFile = "docker-compose.yml"
+$ComposeFile = if ($Environment -eq 'prod') { 'docker-compose.prod.yml' } else { 'docker-compose.yml' }
 
 # Colors for output
 function Print-Header {
