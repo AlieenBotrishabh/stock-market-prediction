@@ -7,8 +7,8 @@ services:
     ports:
       - "27017:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-secure_password}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?Set MONGO_USER in the deployment environment}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD in the deployment environment}
       MONGO_INITDB_DATABASE: stock-market
     volumes:
       - mongodb_prod_data:/data/db
@@ -29,7 +29,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      MONGO_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-secure_password}@mongodb:27017/stock-market
+      MONGO_URI: mongodb://${MONGO_USER:?Set MONGO_USER in the deployment environment}:${MONGO_PASSWORD:?Set MONGO_PASSWORD in the deployment environment}@mongodb:27017/stock-market
       PORT: 5000
       NODE_ENV: production
       INDIANAPI_KEY: ${INDIANAPI_KEY}

@@ -65,7 +65,7 @@ jobs:
       - name: Run pipeline
         working-directory: ml-pipeline
         env:
-          MONGODB_URI: ${{ mongodb+srv://rishabhk1324_db_user:xbi4Eh5G0GocEeDj@cluster0.ifest28.mongodb.net/ }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGODB_DB: ${{ secrets.MONGODB_DB || 'stockmarket' }}
           MODEL_VERSION: lstm-150-single-v1
           LOG_LEVEL: INFO
