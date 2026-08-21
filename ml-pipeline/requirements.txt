@@ -1,25 +1,20 @@
-"""
-Dependencies for stock price prediction pipeline.
+# Stock prediction pipeline.
+#
+# Deliberately lean so a GitHub Actions runner installs quickly:
+#  - no yfinance (Yahoo is called directly with requests)
+#  - no PyWavelets (Haar denoising is implemented in features.py)
+#  - no statsmodels (baselines are naive-drift and linear-drift in numpy)
+#  - no pyarrow (the on-disk cache is CSV)
 
-Install with:
-    pip install -r requirements.txt
-
-Or install individually:
-    pip install requests pandas numpy tensorflow scikit-learn
-"""
-
-# Core HTTP library
 requests>=2.31.0
-
-# Data manipulation and analysis
+numpy>=1.24.0,<2.0
 pandas>=2.0.0
-numpy>=1.24.0
 
-# Machine learning: LSTM models
-# Choose ONE of the following:
-tensorflow>=2.13.0          # Full TensorFlow with Keras
-# torch>=2.0.0              # Alternative: PyTorch with custom LSTM
+# LSTM. CPU-only is fine: a single-layer LSTM(150) over ~2,500 rows trains
+# in a couple of minutes without a GPU.
+tensorflow>=2.13.0
 
-# Utilities
-python-dotenv>=1.0.0       # Load environment variables from .env file
-scikit-learn>=1.3.0        # Additional ML utilities (StandardScaler, etc.)
+# Publishing predictions to MongoDB (optional; the pipeline runs without it)
+pymongo>=4.6.0
+
+python-dotenv>=1.0.0

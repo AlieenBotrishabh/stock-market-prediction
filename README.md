@@ -1,331 +1,137 @@
-# StockPulse - Stock Market Prediction App
+# StockPulse
 
-A modern, real-time stock market tracking application built with React, Node.js, Express, MongoDB, and Tailwind CSS.
+Real-time NSE market data and LSTM-based next-day price forecasts.
 
-## 🎨 Features
-
-- **Real-time Stock Data**: Live stock prices and market updates
-- **NIFTY Indices**: Track NIFTY 50, NIFTY IT, and NIFTY BANK indices
-- **Interactive Charts**: Beautiful price charts with Recharts
-- **Stock Search**: Search stocks by symbol or company name
-- **Stock Details**: Comprehensive stock information including PE ratio, market cap, 52-week highs/lows
-- **Watchlist**: Add and manage your favorite stocks
-- **Modern UI**: Dark theme with green accents using Tailwind CSS
-- **Responsive Design**: Works seamlessly on desktop and mobile
-- **RESTful API**: Complete backend with GET, POST, PUT, DELETE operations
-- **MongoDB Integration**: Persistent data storage
-
-## 🛠️ Tech Stack
-
-### Frontend
-- **React 18**: UI library
-- **Vite**: Build tool
-- **Tailwind CSS**: Utility-first CSS framework
-- **Recharts**: Interactive charting library
-- **Lucide React**: Icon library
-- **React Router**: Navigation
-
-### Backend
-- **Node.js**: Runtime environment
-- **Express**: Web framework
-- **MongoDB**: NoSQL database
-- **Mongoose**: ODM for MongoDB
-- **Axios**: HTTP client
-- **CORS**: Cross-origin resource sharing
-
-## 📁 Project Structure
+React + Vite frontend, a single Express API deployed as one Vercel
+serverless function, MongoDB for caching and model output, and an offline
+Python/TensorFlow pipeline that produces the forecasts.
 
 ```
-stock-market-prediction/
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Navigation.jsx
-│   │   │   ├── SearchBar.jsx
-│   │   │   ├── StockCard.jsx
-│   │   │   ├── StockChart.jsx
-│   │   │   └── NiftyBanner.jsx
-│   │   ├── pages/
-│   │   │   ├── HomePage.jsx
-│   │   │   └── StockDetailsPage.jsx
-│   │   ├── services/
-│   │   │   └── api.js
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── index.css
-│   ├── index.html
-│   ├── vite.config.js
-│   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   └── package.json
-│
-├── backend/
-│   ├── models/
-│   │   ├── Stock.js
-│   │   └── Watchlist.js
-│   ├── routes/
-│   │   ├── stocks.js
-│   │   └── watchlist.js
-│   ├── controllers/
-│   │   ├── stockController.js
-│   │   └── watchlistController.js
-│   ├── server.js
-│   ├── package.json
-│   └── .env.example
-│
-├── ml-pipeline/
-│   ├── api_client.py        # IndianAPI client with rate limiting
-│   ├── data_processor.py    # Feature engineering + sequences
-│   ├── model.py             # LSTM model
-│   ├── main.py              # CLI: collect/process/train
-│   ├── predict.py           # Serve predictions from trained models
-│   ├── requirements.txt     # Python deps
-│   ├── data/                # Raw + processed datasets
-│   ├── models/              # Saved model checkpoints
-│   └── logs/                # Request + training logs
+Yahoo Finance ─┐
+IndianAPI ─────┴──> Express API ──> React SPA
+                         │
+GitHub Action (16:00 IST) │
+   └─ ml-pipeline ──> MongoDB ──┘
 ```
 
-## 📦 Data Pipelines & ML
+## Quick start
 
-- **Purpose**: End-to-end data collection → feature engineering → LSTM training for price prediction using IndianAPI. Full docs in [ml-pipeline/README.md](ml-pipeline/README.md).
-- **Data locations**: Raw JSON in [ml-pipeline/data/raw](ml-pipeline/data/raw), processed CSV in [ml-pipeline/data/processed](ml-pipeline/data/processed), trained models in [ml-pipeline/models](ml-pipeline/models), logs in [ml-pipeline/logs](ml-pipeline/logs).
-- **Env**: Python 3.8+, set `INDIANAPI_KEY` (same key as backend). Optional: update endpoints/symbol format in [ml-pipeline/config.py](ml-pipeline/config.py).
-- **Core commands** (run inside [ml-pipeline](ml-pipeline)):
-  - `python main.py --status` — show remaining daily/monthly quota (no API calls).
-  - `python main.py --collect` — fetch historical OHLCV for all symbols (1 API call per symbol; writes to data/raw).
-  - `python main.py --process` — compute indicators (SMA, EMA, RSI, ROC, volatility) and save CSVs (no API calls).
-  - `python main.py --train` — train LSTM models on processed data and save to models/ (no API calls).
-  - `python main.py --full` — collect → process → train in one go.
-- **Rate limits**: Client enforces 10 requests/day (buffer under 500/month). All calls logged in [ml-pipeline/logs/request_log.json](ml-pipeline/logs/request_log.json).
-- **Prediction CLI**: `python predict.py` to load saved models and print next-day forecasts per symbol; sample usage in [ml-pipeline/example_predict.py](ml-pipeline/example_predict.py).
-- **Integration check**: [verify_integration.py](verify_integration.py) pings backend/front-end and the prediction endpoint to confirm wiring.
-
-## 🚀 Getting Started
-
-### Prerequisites
-- Node.js (v16 or higher)
-- MongoDB (local or Atlas)
-- npm or yarn
-
-### Backend Setup
-
-1. Navigate to the backend folder:
 ```bash
-cd backend
+npm run install-all
+
+cp backend/.env.example backend/.env     # then fill in the values
+npm run dev                              # API :5000 + frontend :3000
 ```
 
-2. Install dependencies:
+`backend/.env`:
+
+| Variable | Required | Notes |
+|---|---|---|
+| `INDIAN_API_KEY` | for news/IPO/funds/fundamentals | **server-side only** — never prefix with `VITE_` |
+| `MONGODB_URI` | for caching + predictions | optional; live quotes work without it |
+| `PORT` | no | defaults to 5000 |
+| `FRONTEND_URL` | production | comma-separated CORS allow-list |
+
+The frontend only needs `VITE_API_URL` (`/api` in production). Every
+`VITE_*` value is inlined into the public bundle, so **no secret may ever
+go in a frontend env file**.
+
+## What was wrong, and what changed
+
+The deployed app showed prices that were wrong by up to 117% and
+predictions that were not predictions. Three root causes:
+
+**1. Production called `localhost`.** `frontend/.env.production` omitted
+`VITE_API_URL`, so the deployed bundle requested
+`http://localhost:5000/api` from each visitor's own machine. Every request
+failed and the app silently served hardcoded mock data — mock TCS ₹3,850
+against a real ₹2,297, mock RELIANCE ₹2,846 against a real ₹1,312.
+
+**2. "AI predictions" were a hash of the ticker string.**
+
+```js
+const hash = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+const variation = ((hash % 100) / 100) * 4 - 2;  // -2% to +2%
+```
+
+The same symbol returned the same number forever. `dataPoints: 100` was a
+literal and "confidence" was derived from the size of that hash. The
+backend's `/api/predict` used `Math.random()`. Neither was ever called.
+
+**3. The ML pipeline had never run** — and could not. It read the API key
+without ever sending it, pointed at a non-existent host, and had an empty
+column mapping that failed on any real payload.
+
+### Now
+
+- **Real data, cached.** Yahoo Finance primary, IndianAPI fallback and for
+  everything Yahoo lacks. Market-hours-aware TTLs, retry with backoff, and
+  stale-while-revalidate.
+- **Nothing is ever fabricated.** Every mock fallback is deleted. Failures
+  render an explicit error state; cached data is labelled with its age.
+  Unknown symbols return 404 rather than a plausible-looking empty object.
+- **A real model** — see [`ml-pipeline/README.md`](ml-pipeline/README.md).
+  It publishes a number only after clearing a walk-forward baseline test,
+  and the API reports `isModelBacked: false` with a reason otherwise.
+- **One backend.** `server.js` and `vercel-app.js` were two divergent apps
+  with copy-pasted handlers and two incompatible Mongoose schemas over the
+  same collections. Now one `createApp()` with two thin entry points.
+- **Full OHLC + ranges + market status**, which is what was missing from
+  the UI: the historical endpoint used to discard open/high/low.
+
+## Security note
+
+A live `sk-live-…` IndianAPI key was hardcoded in the frontend source,
+committed in tracked env files, and shipped in the public JS bundle. It has
+been removed from the working tree, `.gitignore` now covers every `.env`
+variant, and all IndianAPI calls are proxied through the backend.
+
+**The key is still in git history and must be treated as compromised —
+rotate it at indianapi.in.** Removing a file does not remove it from
+history.
+
+## Layout
+
+```
+backend/src/
+  app.js              createApp() — the single Express app
+  providers/          yahoo.js, indian.js, index.js (failover + cache)
+  services/           marketStatus.js, indicators.js, cache.js
+  models/             one canonical Mongoose schema set
+api/index.mjs         Vercel entry (re-exports createApp)
+backend/server.js     local entry
+
+frontend/src/
+  services/marketApi.js   the only network layer; throws, never fabricates
+  components/ui/          RangeBar, AnimatedNumber, States (skeleton/error)
+  components/             StockChart (candles), IndicatorsPanel, PredictionCard
+  pages/
+
+ml-pipeline/          Python: data, features, LSTM, backtest, publish
+tests/                cross-language indicator contract test
+```
+
+## Verification
+
 ```bash
-npm install
+# API — 22 checks across quotes, history, indicators, content, error paths
+curl -s localhost:5000/api/health
+
+# Indicators must agree between Node and Python, or the UI would
+# contradict the model it displays
+python tests/test_indicators.py
+
+# Model validation (~11 min) and the leakage canary
+cd ml-pipeline
+python main.py --backtest --symbol RELIANCE
+python main.py --leak-check --symbol RELIANCE
 ```
 
-3. Create a `.env` file based on `.env.example`:
-```bash
-cp .env.example .env
-```
+After deploying, confirm on the live site that TCS shows its real price and
+that `sk-live` does not appear in the served JS bundle.
 
-4. Update `.env` with your MongoDB URI and API credentials:
-```
-MONGO_URI=mongodb://localhost:27017/stock-market
-PORT=5000
-INDIAN_API_KEY=your_api_key_here
-INDIAN_API_BASE_URL=https://api.indianapi.com
-NODE_ENV=development
-```
+## Disclaimer
 
-5. Start the backend server:
-```bash
-npm start
-# or for development with auto-reload
-npm run dev
-```
-
-The backend will run on `http://localhost:5000`
-
-### Frontend Setup
-
-1. Navigate to the frontend folder:
-```bash
-cd frontend
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Start the development server:
-```bash
-npm run dev
-```
-
-The frontend will run on `http://localhost:3000`
-
-## 📚 API Endpoints
-
-### Stock Routes
-- `GET /api/stocks` - Get all stocks (supports search query)
-- `GET /api/stocks/nifty/data` - Get NIFTY indices data
-- `GET /api/stocks/:symbol` - Get single stock details
-- `GET /api/stocks/:symbol/live` - Get live data from API
-- `POST /api/stocks` - Create/Update a stock
-- `PUT /api/stocks/:symbol` - Update a stock
-- `DELETE /api/stocks/:symbol` - Delete a stock
-
-### Watchlist Routes
-- `GET /api/watchlist/:userId` - Get user's watchlist
-- `POST /api/watchlist/:userId` - Add stock to watchlist
-- `PUT /api/watchlist/:userId/:symbol` - Remove stock from watchlist
-- `DELETE /api/watchlist/:userId` - Delete entire watchlist
-
-## 🎨 Design Features
-
-- **Dark Theme**: Beautiful black and green color scheme
-- **Glass Morphism**: Frosted glass effect on cards
-- **Gradient Text**: Premium gradient effects on headers
-- **Smooth Animations**: Hover effects and transitions
-- **Custom Scrollbar**: Styled scrollbars matching the theme
-- **Responsive Grid**: Adaptable layouts for all screen sizes
-
-## 🔌 Indian API Integration
-
-The application is designed to work with IndianAPI.com's stock data API. To enable live data:
-
-1. Sign up on [indianapi.com](https://indianapi.com)
-2. Get your API key
-3. Update the `.env` file with your API key
-4. Update the `fetchLiveData` function in `stockController.js` to use actual API calls
-
-```javascript
-const response = await axios.get(
-  `${INDIAN_API_BASE_URL}stock/${symbol.toUpperCase()}`,
-  {
-    headers: {
-      'X-API-Key': process.env.INDIAN_API_KEY,
-    },
-  }
-);
-```
-
-## 💾 Database Schema
-
-### Stock Model
-```javascript
-{
-  symbol: String (unique),
-  company_name: String,
-  current_price: Number,
-  previous_close: Number,
-  opening_price: Number,
-  day_high: Number,
-  day_low: Number,
-  volume: String,
-  market_cap: String,
-  pe_ratio: Number,
-  change_percent: Number,
-  change_amount: Number,
-  fifty_two_week_high: Number,
-  fifty_two_week_low: Number,
-  description: String,
-  price_history: Array,
-  last_updated: Date
-}
-```
-
-### Watchlist Model
-```javascript
-{
-  user_id: String,
-  stocks: [
-    {
-      symbol: String,
-      company_name: String,
-      added_at: Date
-    }
-  ]
-}
-```
-
-## 🎯 Usage
-
-### Viewing Stocks
-1. Open the application and view the NIFTY indices on the home page
-2. Browse featured stocks in the grid
-3. Use the search bar to find specific stocks
-
-### Stock Details
-1. Click on any stock card to view detailed information
-2. View interactive price charts
-3. Check key metrics like PE ratio, market cap, and 52-week highs/lows
-4. Add stocks to your watchlist
-
-### Managing Watchlist
-1. Click the heart icon on any stock card to add to watchlist
-2. View all watchlisted stocks (feature can be extended)
-3. Remove stocks from watchlist by clicking the filled heart icon
-
-## 🔐 Environment Variables
-
-### Backend
-```
-MONGO_URI - MongoDB connection string
-PORT - Server port (default: 5000)
-INDIAN_API_KEY - API key for indianapi.com
-INDIAN_API_BASE_URL - Base URL for the API
-NODE_ENV - Environment (development/production)
-```
-
-## 📦 Build for Production
-
-### Frontend
-```bash
-cd frontend
-npm run build
-```
-
-### Backend
-Ensure all environment variables are set and MongoDB is accessible, then:
-```bash
-npm start
-```
-
-## 🤝 Contributing
-
-Feel free to fork, modify, and improve this project. Some enhancement ideas:
-- Real-time WebSocket updates
-- User authentication
-- Portfolio tracking
-- Stock predictions using ML
-- Advanced charting features
-- Mobile app version
-
-## 📄 License
-
-This project is open source and available under the MIT License.
-
-## 🆘 Troubleshooting
-
-### MongoDB Connection Issues
-- Ensure MongoDB is running locally or update MONGO_URI with your Atlas connection string
-- Check that your firewall allows MongoDB connections
-
-### CORS Errors
-- Ensure backend is running on port 5000
-- Check that frontend proxy is correctly configured in vite.config.js
-
-### API Errors
-- Verify Indian API key is valid
-- Check API rate limits
-- Ensure correct API base URL
-
-## 📞 Support
-
-For issues and questions, please refer to the documentation or check the respective library documentation:
-- [React Documentation](https://react.dev)
-- [Express Documentation](https://expressjs.com)
-- [MongoDB Documentation](https://docs.mongodb.com)
-- [Tailwind CSS Documentation](https://tailwindcss.com)
-
----
-
-**Enjoy tracking the stock market with StockPulse! 📈**
+Forecasts are model output for research and education. Next-day equity
+prices are close to a random walk; a low error figure does not imply a
+profitable strategy. Nothing here is investment advice.

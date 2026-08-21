@@ -1,279 +1,240 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import Navigation from '../components/Navigation';
-import SearchBar from '../components/SearchBar';
+import { motion } from 'framer-motion';
+import { LayoutGrid, List, TrendingUp, TrendingDown, Activity, RefreshCw } from 'lucide-react';
+import HeroSection from '../components/HeroSection';
+import PageLayout from '../components/PageLayout';
 import StockCard from '../components/StockCard';
 import StockTable from '../components/StockTable';
 import NiftyBanner from '../components/NiftyBanner';
-import Footer from '../components/Footer';
-import { getStocks, getNiftyData } from '../services/api';
+import SearchBar from '../components/SearchBar';
+import MarketStatusBadge from '../components/MarketStatusBadge';
+import { SkeletonGrid, ErrorState, EmptyState, StaleBanner } from '../components/ui/States';
+import { getQuotes, getIndices } from '../services/marketApi';
+import { formatPercent } from '../utils/formatting';
+
+/**
+ * Home / market overview.
+ *
+ * Removed from the previous version:
+ *  - `mockStocks`, an 8-entry hardcoded array used whenever a fetch failed
+ *    (which, in production, was always — see the localhost bug).
+ *  - Hardcoded NIFTY fallbacks (NIFTY 50 = 21,234.50 etc.).
+ *  - `Market Status: 'Open'` as a literal string, regardless of the time,
+ *    the day, or the exchange.
+ *  - One HTTP request per symbol, refired on every keystroke because
+ *    `searchTerm` sat in the fetch effect's dependency array. Search is now
+ *    debounced and filters client-side; quotes load once in a single
+ *    batched request.
+ */
+
+/** Default watch universe. */
+const SYMBOLS = [
+  'TCS', 'INFY', 'RELIANCE', 'HDFCBANK', 'ICICIBANK',
+  'WIPRO', 'LT', 'SBIN', 'BHARTIARTL', 'AXISBANK',
+  'TATASTEEL', 'MARUTI', 'HCLTECH', 'ITC', 'BAJFINANCE',
+];
+
+const REFRESH_MS = 60_000;
 
 const HomePage = () => {
-  const [stocks, setStocks] = useState([]);
-  const [niftyData, setNiftyData] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [navOpen, setNavOpen] = useState(false);
-  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'table'
   const navigate = useNavigate();
+  const [quotes, setQuotes] = useState([]);
+  const [indices, setIndices] = useState([]);
+  const [search, setSearch] = useState('');
+  const [viewMode, setViewMode] = useState('grid');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const mounted = useRef(true);
 
-  // Mock stock data for demo
-  const mockStocks = [
-    {
-      symbol: 'TCS',
-      company_name: 'Tata Consultancy Services',
-      current_price: 3850.50,
-      change_percent: 2.45,
-      change_amount: 92.50,
-      day_high: 3900,
-      day_low: 3800,
-      opening_price: 3825,
-      previous_close: 3758,
-    },
-    {
-      symbol: 'INFY',
-      company_name: 'Infosys Limited',
-      current_price: 1625.75,
-      change_percent: -1.23,
-      change_amount: -20.25,
-      day_high: 1680,
-      day_low: 1620,
-      opening_price: 1645,
-      previous_close: 1646,
-    },
-    {
-      symbol: 'HDFC',
-      company_name: 'HDFC Bank Limited',
-      current_price: 1750.25,
-      change_percent: 3.15,
-      change_amount: 53.50,
-      day_high: 1800,
-      day_low: 1720,
-      opening_price: 1700,
-      previous_close: 1696.75,
-    },
-    {
-      symbol: 'RELIANCE',
-      company_name: 'Reliance Industries',
-      current_price: 2845.90,
-      change_percent: 1.75,
-      change_amount: 49.25,
-      day_high: 2900,
-      day_low: 2820,
-      opening_price: 2810,
-      previous_close: 2796.65,
-    },
-    {
-      symbol: 'ICICIBANK',
-      company_name: 'ICICI Bank Limited',
-      current_price: 825.50,
-      change_percent: -0.85,
-      change_amount: -7.10,
-      day_high: 850,
-      day_low: 820,
-      opening_price: 835,
-      previous_close: 832.60,
-    },
-    {
-      symbol: 'WIPRO',
-      company_name: 'Wipro Limited',
-      current_price: 450.75,
-      change_percent: 2.30,
-      change_amount: 10.15,
-      day_high: 465,
-      day_low: 445,
-      opening_price: 442,
-      previous_close: 440.60,
-    },
-    {
-      symbol: 'LT',
-      company_name: 'Larsen & Toubro',
-      current_price: 2125.50,
-      change_percent: 1.95,
-      change_amount: 41.00,
-      day_high: 2150,
-      day_low: 2100,
-      opening_price: 2090,
-      previous_close: 2084.50,
-    },
-    {
-      symbol: 'BAJAJFINSV',
-      company_name: 'Bajaj Finserv Limited',
-      current_price: 1565.25,
-      change_percent: -0.45,
-      change_amount: -7.10,
-      day_high: 1600,
-      day_low: 1550,
-      opening_price: 1575,
-      previous_close: 1572.35,
-    },
-  ];
+  // Set on mount as well as cleared on unmount. Under React 18 StrictMode
+  // effects run mount -> cleanup -> mount, so a cleanup-only version would
+  // leave this false forever after the remount and the loading state would
+  // never resolve.
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const load = useCallback(async ({ signal, quiet = false } = {}) => {
+    if (quiet) setRefreshing(true); else setLoading(true);
+    try {
+      // Both in flight together; a failure in one must not blank the other.
+      const [quoteResult, indexResult] = await Promise.allSettled([
+        getQuotes(SYMBOLS, { signal }),
+        getIndices({ signal }),
+      ]);
+
+      // A cancelled request means this effect was superseded, not that
+      // loading failed. Without the guard, StrictMode's discarded first
+      // mount would set an error over the successful retry.
+      if (!mounted.current || signal?.aborted) return;
+
+      if (quoteResult.status === 'fulfilled') {
+        setQuotes(quoteResult.value.quotes);
+        setError(null);
+      } else if (!quiet && quoteResult.reason?.name !== 'AbortError') {
+        setError(quoteResult.reason);
+      }
+
+      if (indexResult.status === 'fulfilled') setIndices(indexResult.value);
+    } finally {
+      if (mounted.current) { setLoading(false); setRefreshing(false); }
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Fetch stocks
-        if (searchTerm) {
-          const filteredStocks = mockStocks.filter(
-            (stock) =>
-              stock.symbol.includes(searchTerm.toUpperCase()) ||
-              stock.company_name.toLowerCase().includes(searchTerm.toLowerCase())
-          );
-          setStocks(filteredStocks);
-        } else {
-          setStocks(mockStocks);
-        }
+    const c = new AbortController();
+    load({ signal: c.signal });
+    return () => c.abort();
+  }, [load]);
 
-        // Fetch NIFTY data
-        setNiftyData([
-          {
-            symbol: 'NIFTY 50',
-            company_name: 'NIFTY 50 Index',
-            current_price: 21234.50,
-            change_percent: 1.25,
-          },
-          {
-            symbol: 'NIFTY IT',
-            company_name: 'NIFTY IT Index',
-            current_price: 42156.00,
-            change_percent: 2.15,
-          },
-          {
-            symbol: 'NIFTY BANK',
-            company_name: 'NIFTY BANK Index',
-            current_price: 54321.75,
-            change_percent: -0.85,
-          },
-        ]);
+  // Poll only while the tab is visible.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') load({ quiet: true });
+    }, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [load]);
 
-        setLoading(false);
-      } catch (error) {
-        console.error('Error fetching data:', error);
-        setLoading(false);
-      }
-    };
+  // Client-side filter — the full universe is already loaded.
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return quotes;
+    return quotes.filter(
+      (s) =>
+        s.symbol?.toLowerCase().includes(q) ||
+        s.name?.toLowerCase().includes(q),
+    );
+  }, [quotes, search]);
 
-    const timer = setTimeout(() => {
-      fetchData();
-    }, 300);
+  const stats = useMemo(() => {
+    const gainers = quotes.filter((s) => (s.changePercent ?? 0) > 0);
+    const losers = quotes.filter((s) => (s.changePercent ?? 0) < 0);
+    const avg = quotes.length
+      ? quotes.reduce((a, s) => a + (s.changePercent ?? 0), 0) / quotes.length
+      : null;
+    return { total: quotes.length, gainers: gainers.length, losers: losers.length, avg };
+  }, [quotes]);
 
-    return () => clearTimeout(timer);
-  }, [searchTerm]);
-
-  const handleSelectStock = (symbol) => {
-    navigate(`/stock/${symbol}`);
-  };
-
-  const handleWatchlist = (stock) => {
-    console.log('Added to watchlist:', stock);
-    // Implement watchlist functionality
-  };
+  const anyStale = quotes.some((q) => q.isStale);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-primary-dark to-primary-light">
-      <Navigation isOpen={navOpen} setIsOpen={setNavOpen} />
+    <>
+      <HeroSection indices={indices} />
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {/* Hero Section */}
-        <div className="mb-12">
-          <h1 className="gradient-text text-5xl md:text-6xl font-bold mb-4">
-            Stock Market Intelligence
-          </h1>
-          <p className="text-text-secondary text-lg max-w-2xl">
-            Real-time stock data, live charts, and market insights. Track your favorite companies
-            and make informed investment decisions.
-          </p>
-        </div>
-
-        {/* Search Bar */}
-        <div className="mb-12">
-          <SearchBar onSearch={setSearchTerm} />
-        </div>
-
-        {/* NIFTY Banner */}
-        <NiftyBanner niftyData={niftyData} />
-
-        {/* Stocks Section */}
+      <PageLayout>
+        {/* Indices */}
         <div className="mb-8">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-3xl font-bold text-white">Featured Stocks</h2>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setViewMode('grid')}
-                className={`px-4 py-2 rounded-lg font-semibold transition ${
-                  viewMode === 'grid'
-                    ? 'bg-accent-green text-primary-dark'
-                    : 'glass-effect text-text-secondary hover:text-white'
-                }`}
-              >
-                Grid
-              </button>
-              <button
-                onClick={() => setViewMode('table')}
-                className={`px-4 py-2 rounded-lg font-semibold transition ${
-                  viewMode === 'table'
-                    ? 'bg-accent-green text-primary-dark'
-                    : 'glass-effect text-text-secondary hover:text-white'
-                }`}
-              >
-                Table
-              </button>
-            </div>
+          <NiftyBanner indices={indices} loading={loading} />
+        </div>
+
+        {/* Controls */}
+        <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h2 className="text-2xl font-bold text-white">Market Overview</h2>
+            <MarketStatusBadge />
           </div>
 
-          {loading ? (
-            <div className="text-center py-12">
-              <div className="text-accent-green text-xl font-semibold">Loading stocks...</div>
-            </div>
-          ) : stocks.length === 0 ? (
-            <div className="text-center py-12">
-              <p className="text-text-secondary text-lg">No stocks found matching your search.</p>
-            </div>
-          ) : viewMode === 'grid' ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {stocks.map((stock) => (
-                <StockCard
-                  key={stock.symbol}
-                  stock={stock}
-                  onSelect={handleSelectStock}
-                  onWatchlist={handleWatchlist}
-                />
+          <div className="flex items-center gap-3 flex-wrap">
+            <SearchBar onSearch={setSearch} placeholder="Filter by symbol or company…" />
+            <motion.button
+              whileTap={{ scale: 0.94 }}
+              onClick={() => load({ quiet: true })}
+              aria-label="Refresh"
+              className="p-2 rounded-lg glass-effect border border-white/10 text-white/50 hover:text-white transition-colors"
+            >
+              <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+            </motion.button>
+            <div className="flex gap-0.5 p-0.5 rounded-lg bg-white/5">
+              {[
+                { key: 'grid', Icon: LayoutGrid },
+                { key: 'table', Icon: List },
+              ].map(({ key, Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setViewMode(key)}
+                  aria-label={`${key} view`}
+                  aria-pressed={viewMode === key}
+                  className={`p-1.5 rounded-md transition-colors ${
+                    viewMode === key ? 'bg-white/15 text-white' : 'text-white/40 hover:text-white'
+                  }`}
+                >
+                  <Icon size={15} />
+                </button>
               ))}
             </div>
-          ) : (
-            <StockTable stocks={stocks} onSelectStock={handleSelectStock} />
-          )}
-        </div>
-
-
-      <Footer />
-        {/* Market Stats Footer */}
-        <div className="glass-effect p-6 rounded-xl border border-border-color mt-12">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            <div>
-              <p className="text-text-secondary text-sm mb-2">Total Stocks</p>
-              <p className="text-2xl font-bold text-accent-green">{stocks.length}</p>
-            </div>
-            <div>
-              <p className="text-text-secondary text-sm mb-2">Market Status</p>
-              <p className="text-2xl font-bold text-accent-green">Open</p>
-            </div>
-            <div>
-              <p className="text-text-secondary text-sm mb-2">Gainers</p>
-              <p className="text-2xl font-bold text-chart-up">
-                {stocks.filter((s) => s.change_percent > 0).length}
-              </p>
-            </div>
-            <div>
-              <p className="text-text-secondary text-sm mb-2">Losers</p>
-              <p className="text-2xl font-bold text-chart-down">
-                {stocks.filter((s) => s.change_percent < 0).length}
-              </p>
-            </div>
           </div>
         </div>
-      </div>
-    </div>
+
+        {anyStale && <StaleBanner />}
+
+        {/* Stats */}
+        {!loading && !error && quotes.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8"
+          >
+            {[
+              { label: 'Tracked', value: stats.total, Icon: Activity, color: 'text-accent-blue' },
+              { label: 'Advancing', value: stats.gainers, Icon: TrendingUp, color: 'text-accent-green' },
+              { label: 'Declining', value: stats.losers, Icon: TrendingDown, color: 'text-accent-red' },
+              {
+                label: 'Avg Change',
+                value: stats.avg == null ? '—' : formatPercent(stats.avg),
+                Icon: Activity,
+                color: (stats.avg ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red',
+              },
+            ].map(({ label, value, Icon, color }) => (
+              <div key={label} className="glass-effect rounded-2xl p-5 border border-white/10">
+                <div className="flex items-center gap-2 mb-2">
+                  <Icon size={13} className={color} />
+                  <p className="text-white/40 text-xs uppercase tracking-wider font-semibold">
+                    {label}
+                  </p>
+                </div>
+                <p className={`text-2xl font-bold tabular-nums ${color}`}>{value}</p>
+              </div>
+            ))}
+          </motion.div>
+        )}
+
+        {/* Listing */}
+        {loading ? (
+          <SkeletonGrid count={8} />
+        ) : error ? (
+          <ErrorState error={error} onRetry={() => load()} />
+        ) : filtered.length === 0 ? (
+          <EmptyState message={search ? `No stocks match "${search}".` : 'No stocks available.'} />
+        ) : viewMode === 'grid' ? (
+          <motion.div
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5"
+            initial="hidden"
+            animate="show"
+            variants={{ show: { transition: { staggerChildren: 0.04 } } }}
+          >
+            {filtered.map((stock) => (
+              <motion.div
+                key={stock.symbol}
+                variants={{ hidden: { opacity: 0, y: 18 }, show: { opacity: 1, y: 0 } }}
+              >
+                <StockCard
+                  stock={stock}
+                  onClick={() => navigate(`/stock/${stock.symbol}`)}
+                />
+              </motion.div>
+            ))}
+          </motion.div>
+        ) : (
+          <StockTable
+            stocks={filtered}
+            onRowClick={(s) => navigate(`/stock/${s.symbol}`)}
+          />
+        )}
+      </PageLayout>
+    </>
   );
 };
 

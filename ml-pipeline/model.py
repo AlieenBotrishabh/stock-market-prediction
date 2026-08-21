@@ -1,381 +1,174 @@
 """
-Model training and evaluation module.
+The LSTM model.
 
-Handles:
-- Building LSTM model architecture
-- Training on preprocessed time-series data
-- Evaluation metrics (MAE, RMSE, etc.)
-- Model checkpointing and saving
-- Prediction on new data
+Architecture follows Bhandari et al. (2022), whose central finding was that
+a SINGLE LSTM layer outperformed every multilayer variant they tested --
+their best model (1 layer, 150 neurons) scored test MAPE 0.80%, RMSE 40.46,
+R 0.9976, while stacked configurations were consistently worse.
+
+The previous implementation here used 2 x LSTM(64) + Dense(32), i.e. the
+stacked arrangement the paper found inferior, and had never been trained
+(models/ and data/ were empty; model.log had zero lines).
+
+Moghar & Hamiche (2020) document that an LSTM loses tracking when the
+asset's volatility regime shifts. That is why training reports residual
+spread and why backtest.py validates walk-forward rather than on one split.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Tuple, Optional, Dict, Any
+import os
+
 import numpy as np
-import json
-from pathlib import Path
 
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from tensorflow.keras import layers, models
-    from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    logger_temp = logging.getLogger(__name__)
-    logger_temp.warning(
-        "TensorFlow/Keras not available. Install with: pip install tensorflow"
-    )
+# Keep TF quiet and deterministic-ish before it is imported.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
-from config import Config
+import tensorflow as tf  # noqa: E402
+from tensorflow import keras  # noqa: E402
 
-# Configure logging
-logging.basicConfig(
-    level=Config.LOG_LEVEL,
-    format=Config.LOG_FORMAT,
-    handlers=[
-        logging.FileHandler(Config.LOGS_DIR / "model.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+import config  # noqa: E402
+
+log = logging.getLogger(__name__)
 
 
-class StockPricePredictor:
+def set_seeds(seed: int = config.RANDOM_SEED) -> None:
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+
+def _optimizer(name: str, learning_rate: float):
+    """Bhandari's grid was {Adam, Adagrad, Nadam} x {0.1, 0.01, 0.001}."""
+    name = name.lower()
+    if name == "adam":
+        return keras.optimizers.Adam(learning_rate=learning_rate)
+    if name == "nadam":
+        return keras.optimizers.Nadam(learning_rate=learning_rate)
+    if name == "adagrad":
+        return keras.optimizers.Adagrad(learning_rate=learning_rate)
+    raise ValueError(f"Unknown optimizer: {name}")
+
+
+def build_model(
+    time_step: int,
+    n_features: int,
+    units: int = config.LSTM_UNITS,
+    layers: int = config.LSTM_LAYERS,
+    dropout: float = config.DROPOUT,
+    optimizer: str = config.OPTIMIZER,
+    learning_rate: float = config.LEARNING_RATE,
+) -> keras.Model:
     """
-    LSTM-based time-series model for stock price prediction.
-    
-    Architecture:
-    - Input: Sequences of (sequence_length, num_features)
-    - LSTM layers: Capture temporal patterns
-    - Dense layers: Non-linear transformations
-    - Output: Next-day price (or direction)
-    
-    Training:
-    - Loss: Mean Squared Error (MSE)
-    - Optimizer: Adam with learning rate decay
-    - Early stopping: Prevent overfitting
-    """
+    Build the regression network.
 
-    def __init__(self, input_shape: Tuple[int, int]):
-        """
-        Initialize model architecture.
-        
-        Args:
-            input_shape: (sequence_length, num_features)
-                Example: (10, 13) for 10 days of 13 features
-        """
-        if not TENSORFLOW_AVAILABLE:
-            raise ImportError(
-                "TensorFlow is required. Install with: pip install tensorflow"
+    Default is Bhandari's winner: one LSTM layer of 150 units into a single
+    linear output. `layers > 1` is supported for reproducing their
+    (worse-performing) multilayer comparison.
+    """
+    model = keras.Sequential(name="stock_lstm")
+    model.add(keras.layers.Input(shape=(time_step, n_features)))
+
+    for i in range(layers):
+        is_last = i == layers - 1
+        model.add(
+            keras.layers.LSTM(
+                units if is_last else max(units // (2 ** (layers - 1 - i)), 8),
+                return_sequences=not is_last,
+                name=f"lstm_{i + 1}",
             )
-        
-        self.input_shape = input_shape
-        self.model = self._build_model()
-        self.history = None
-        self.metadata = {}
+        )
+        if dropout:
+            model.add(keras.layers.Dropout(dropout, name=f"dropout_{i + 1}"))
 
-    def _build_model(self) -> keras.Model:
-        """
-        Build LSTM model architecture.
-        
-        Architecture:
-        1. Input layer: (batch, sequence_length, num_features)
-        2. LSTM layer 1: 64 units, return sequences
-        3. Dropout: 0.2
-        4. LSTM layer 2: 64 units
-        5. Dropout: 0.2
-        6. Dense layer: 32 units, ReLU
-        7. Output layer: 1 unit (price prediction)
-        
-        Returns:
-            Compiled Keras model
-        """
-        model = models.Sequential([
-            # First LSTM layer
-            layers.LSTM(
-                Config.LSTM_UNITS,
-                return_sequences=True,
-                input_shape=self.input_shape,
-                name="lstm_1"
-            ),
-            layers.Dropout(Config.DROPOUT_RATE, name="dropout_1"),
-            
-            # Second LSTM layer
-            layers.LSTM(
-                Config.LSTM_UNITS,
-                return_sequences=False,
-                name="lstm_2"
-            ),
-            layers.Dropout(Config.DROPOUT_RATE, name="dropout_2"),
-            
-            # Dense layers
-            layers.Dense(32, activation="relu", name="dense_1"),
-            layers.Dropout(Config.DROPOUT_RATE, name="dropout_3"),
-            
-            # Output layer
-            layers.Dense(1, name="output"),
-        ])
-        
-        # Compile with Adam optimizer and MSE loss
-        optimizer = keras.optimizers.Adam(learning_rate=Config.LEARNING_RATE)
+    # Linear output: this is a regression onto the scaled close, not a
+    # classification. No activation.
+    model.add(keras.layers.Dense(1, name="output"))
+
+    model.compile(
+        optimizer=_optimizer(optimizer, learning_rate),
+        loss="mean_squared_error",
+        metrics=["mae"],
+    )
+    return model
+
+
+def train_model(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+    *,
+    epochs: int = config.EPOCHS,
+    batch_size: int = config.BATCH_SIZE,
+    verbose: int = 0,
+    base_model: keras.Model | None = None,
+    **build_kwargs,
+) -> tuple[keras.Model, dict]:
+    """
+    Fit the model, with early stopping on validation loss.
+
+    `base_model` warm-starts from an already-trained network (transfer
+    learning). Hiransha et al. (2018) found a model trained on one NSE
+    stock transferred to other NSE stocks and even to NYSE, so fine-tuning
+    a shared base is both cheaper and better-supported than 15 cold starts.
+    """
+    time_step, n_features = x_train.shape[1], x_train.shape[2]
+
+    if base_model is not None:
+        model = keras.models.clone_model(base_model)
+        model.set_weights(base_model.get_weights())
         model.compile(
-            optimizer=optimizer,
-            loss=Config.LOSS_FUNCTION,
-            metrics=Config.METRICS,
+            optimizer=_optimizer(
+                build_kwargs.get("optimizer", config.OPTIMIZER),
+                # Lower LR when fine-tuning so the transferred weights are
+                # refined rather than overwritten.
+                build_kwargs.get("learning_rate", config.LEARNING_RATE) / 10,
+            ),
+            loss="mean_squared_error",
+            metrics=["mae"],
         )
-        
-        logger.info("✓ Model architecture created")
-        model.summary()
-        
-        return model
-
-    def train(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-        symbol: str = "stock",
-    ) -> Dict[str, Any]:
-        """
-        Train model on training data with validation.
-        
-        Features:
-        - Early stopping: Stop if validation loss doesn't improve
-        - Model checkpointing: Save best model during training
-        - Learning rate scheduling: Optional (configured in Keras)
-        
-        Args:
-            X_train: Training features (num_samples, sequence_length, num_features)
-            y_train: Training targets (num_samples,)
-            X_val: Validation features
-            y_val: Validation targets
-            symbol: Stock symbol (for logging and checkpointing)
-            
-        Returns:
-            Dict with training history and metrics
-        """
-        logger.info(f"Starting training for {symbol}...")
-        logger.info(
-            f"Training data: {X_train.shape}, Validation data: {X_val.shape}"
-        )
-        
-        # Callbacks
-        checkpoint_path = Config.get_model_path(f"{symbol}_best")
-        early_stop = EarlyStopping(
-            monitor="val_loss",
-            patience=10,
-            restore_best_weights=True,
-            verbose=1,
-        )
-        checkpoint = ModelCheckpoint(
-            filepath=str(checkpoint_path),
-            monitor="val_loss",
-            save_best_only=True,
-            verbose=1,
-        )
-        
-        # Train
-        history = self.model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=Config.EPOCHS,
-            batch_size=Config.BATCH_SIZE,
-            callbacks=[early_stop, checkpoint],
-            verbose=1,
-        )
-        
-        self.history = history
-        
-        # Log results
-        final_loss = history.history["loss"][-1]
-        final_val_loss = history.history["val_loss"][-1]
-        final_mae = history.history["mae"][-1]
-        final_val_mae = history.history["val_mae"][-1]
-        
-        logger.info(f"✓ Training complete")
-        logger.info(f"  Final loss: {final_loss:.6f}")
-        logger.info(f"  Final val_loss: {final_val_loss:.6f}")
-        logger.info(f"  Final MAE: {final_mae:.6f}")
-        logger.info(f"  Final val_MAE: {final_val_mae:.6f}")
-        
-        # Store metadata
-        self.metadata = {
-            "symbol": symbol,
-            "final_loss": float(final_loss),
-            "final_val_loss": float(final_val_loss),
-            "final_mae": float(final_mae),
-            "final_val_mae": float(final_val_mae),
-            "epochs_trained": len(history.history["loss"]),
-            "input_shape": self.input_shape,
-        }
-        
-        return {
-            "loss": final_loss,
-            "val_loss": final_val_loss,
-            "mae": final_mae,
-            "val_mae": final_val_mae,
-            "epochs": len(history.history["loss"]),
-        }
-
-    def evaluate(
-        self,
-        X_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> Dict[str, float]:
-        """
-        Evaluate model on test set.
-        
-        Args:
-            X_test: Test features
-            y_test: Test targets
-            
-        Returns:
-            Dict with loss and metrics
-        """
-        logger.info("Evaluating on test set...")
-        
-        loss, mae, mse = self.model.evaluate(X_test, y_test, verbose=0)
-        
-        # Compute RMSE
-        rmse = np.sqrt(mse)
-        
-        # Get predictions for additional metrics
-        y_pred = self.model.predict(X_test, verbose=0)
-        mape = self._compute_mape(y_test, y_pred)
-        
-        logger.info(f"✓ Test Results:")
-        logger.info(f"  Loss (MSE): {loss:.6f}")
-        logger.info(f"  MAE: {mae:.6f}")
-        logger.info(f"  RMSE: {rmse:.6f}")
-        logger.info(f"  MAPE: {mape:.2f}%")
-        
-        return {
-            "loss": float(loss),
-            "mae": float(mae),
-            "mse": float(mse),
-            "rmse": float(rmse),
-            "mape": float(mape),
-        }
-
-    @staticmethod
-    def _compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """
-        Compute Mean Absolute Percentage Error.
-        
-        MAPE = mean(|y_true - y_pred| / |y_true|) * 100
-        
-        Args:
-            y_true: Actual values
-            y_pred: Predicted values
-            
-        Returns:
-            MAPE percentage
-        """
-        # Avoid division by zero
-        mask = y_true != 0
-        if mask.sum() == 0:
-            return 0.0
-        
-        mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
-        return mape
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Make predictions on new data.
-        
-        Args:
-            X: Features (num_samples, sequence_length, num_features)
-            
-        Returns:
-            Predictions (num_samples,)
-        """
-        return self.model.predict(X, verbose=0)
-
-    def save(self, name: str = "stock_predictor") -> Path:
-        """
-        Save trained model and metadata.
-        
-        Args:
-            name: Model name (default: stock_predictor)
-            
-        Returns:
-            Path to saved model
-        """
-        model_path = Config.get_model_path(name)
-        
-        try:
-            self.model.save(str(model_path))
-            logger.info(f"✓ Saved model to {model_path}")
-            
-            # Save metadata
-            metadata_path = model_path.with_suffix(".json")
-            with open(metadata_path, "w") as f:
-                json.dump(self.metadata, f, indent=2)
-            logger.info(f"✓ Saved metadata to {metadata_path}")
-            
-            return model_path
-        except Exception as e:
-            logger.error(f"Failed to save model: {e}")
-            raise
-
-    @staticmethod
-    def load(name: str = "stock_predictor") -> Optional["StockPricePredictor"]:
-        """
-        Load previously trained model.
-        
-        Args:
-            name: Model name
-            
-        Returns:
-            StockPricePredictor instance or None if not found
-        """
-        model_path = Config.get_model_path(name)
-        
-        if not model_path.exists():
-            logger.warning(f"Model not found at {model_path}")
-            return None
-        
-        try:
-            keras_model = keras.models.load_model(str(model_path))
-            
-            # Load metadata
-            metadata_path = model_path.with_suffix(".json")
-            metadata = {}
-            if metadata_path.exists():
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
-            
-            # Create instance
-            input_shape = tuple(keras_model.input_shape[1:])
-            predictor = StockPricePredictor(input_shape)
-            predictor.model = keras_model
-            predictor.metadata = metadata
-            
-            logger.info(f"✓ Loaded model from {model_path}")
-            return predictor
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            return None
-
-    def get_summary(self) -> str:
-        """Get model summary as string."""
-        from io import StringIO
-        import sys
-        
-        old_stdout = sys.stdout
-        sys.stdout = StringIO()
-        self.model.summary()
-        summary = sys.stdout.getvalue()
-        sys.stdout = old_stdout
-        
-        return summary
-
-
-if __name__ == "__main__":
-    if TENSORFLOW_AVAILABLE:
-        print("Model training module loaded. Use with data_processor and api_client.")
     else:
-        print("TensorFlow not installed. Install with: pip install tensorflow")
+        model = build_model(time_step, n_features, **build_kwargs)
+
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss" if x_val is not None else "loss",
+            patience=config.EARLY_STOPPING_PATIENCE,
+            restore_best_weights=True,
+            verbose=0,
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss" if x_val is not None else "loss",
+            factor=0.5, patience=6, min_lr=1e-5, verbose=0,
+        ),
+    ]
+
+    fit_kwargs = dict(
+        x=x_train, y=y_train, epochs=epochs, batch_size=batch_size,
+        callbacks=callbacks, verbose=verbose,
+        # Never shuffle: these are time-ordered sequences.
+        shuffle=False,
+    )
+    if x_val is not None and len(x_val):
+        fit_kwargs["validation_data"] = (x_val, y_val)
+
+    history = model.fit(**fit_kwargs)
+    return model, {k: [float(x) for x in v] for k, v in history.history.items()}
+
+
+def save_model(model: keras.Model, symbol: str, version: str = config.MODEL_VERSION) -> str:
+    path = config.MODEL_DIR / f"{symbol.upper()}_{version}.keras"
+    model.save(path)
+    log.info("saved model -> %s", path)
+    return str(path)
+
+
+def load_model(symbol: str, version: str = config.MODEL_VERSION):
+    path = config.MODEL_DIR / f"{symbol.upper()}_{version}.keras"
+    if not path.exists():
+        return None
+    return keras.models.load_model(path)
+
+
+__all__ = ["build_model", "train_model", "save_model", "load_model", "set_seeds"]

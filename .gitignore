@@ -1,18 +1,23 @@
 # .gitignore file for stock-market-prediction
 
+# ─── Secrets ────────────────────────────────────────────
+# Every .env variant is ignored by default. Only *.example files are
+# tracked, and those must contain placeholders — never real values.
+# NOTE: .env.production was previously tracked WITH a live API key. That
+# key is in git history and must be treated as compromised/rotated.
+.env
+.env.*
+!.env.example
+!**/.env.example
+.env.docker
+
 # Backend
 backend/node_modules/
-backend/.env
-backend/.env.local
-backend/.env.*.local
 backend/package-lock.json
 backend/dist/
 
 # Frontend
 frontend/node_modules/
-frontend/.env
-frontend/.env.local
-frontend/.env.*.local
 frontend/package-lock.json
 frontend/dist/
 frontend/build/
@@ -47,3 +52,20 @@ yarn-error.log*
 .temp/
 tmp/
 *.tmp
+.vercel
+
+# Node (root workspace)
+node_modules/
+
+# Python / ML pipeline artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ml-pipeline/data/
+ml-pipeline/models/
+ml-pipeline/scalers/
+
+# Debug leftovers (captured API responses)
+temp_*.json
+yahoo_*.json

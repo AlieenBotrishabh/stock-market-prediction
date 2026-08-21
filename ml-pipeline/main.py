@@ -1,397 +1,231 @@
 """
-Main orchestration script for stock price prediction pipeline.
+Pipeline CLI.
 
-Usage:
-    # Collect data for all symbols (respects rate limits)
-    python main.py --collect
-    
-    # Process collected data and train models
-    python main.py --train
-    
-    # Full pipeline: collect + process + train
-    python main.py --full
-    
-    # Check rate limit status without making requests
-    python main.py --status
+Typical use:
 
-Environment:
-    INDIANAPI_KEY: Your API key from indianapi.com (required)
+    python main.py --train --symbols RELIANCE TCS   # train + backtest
+    python main.py --predict --publish              # daily inference
+    python main.py --full                           # everything
+    python main.py --backtest --symbol RELIANCE     # validation only
+    python main.py --leak-check --symbol RELIANCE   # leakage canary
+    python main.py --status                         # what exists on disk
+
+The scheduled GitHub Action runs `--predict --publish` on weekdays after
+the NSE close, and `--full` weekly to retrain.
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import logging
 import sys
-from typing import Optional
+import time
+import warnings
+from datetime import datetime, timezone
 
-from config import Config
-from api_client import IndianAPIClient
-from data_processor import DataProcessor
-from model import StockPricePredictor
-from predict import StockPredictor
+warnings.filterwarnings("ignore")
 
-# Configure logging
+import config
+
 logging.basicConfig(
-    level=Config.LOG_LEVEL,
-    format=Config.LOG_FORMAT,
+    level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s  %(levelname)-7s %(message)s",
+    datefmt="%H:%M:%S",
     handlers=[
-        logging.FileHandler(Config.LOGS_DIR / "pipeline.log"),
-        logging.StreamHandler(),
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(config.BASE_DIR / "logs" / "pipeline.log", encoding="utf-8"),
     ],
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("pipeline")
 
 
-def collect_data() -> bool:
-    """
-    Collect historical data from IndianAPI for all configured symbols.
-    
-    Process:
-    1. Check rate limits before each request
-    2. Fetch historical data for each symbol
-    3. Save raw JSON locally
-    4. Log all requests for quota tracking
-    
-    Returns:
-        True if all symbols collected successfully, False otherwise
-    """
-    logger.info("=" * 60)
-    logger.info("PHASE 1: DATA COLLECTION")
-    logger.info("=" * 60)
-    
-    client = IndianAPIClient()
-    
-    # Check and display rate limit status
-    stats = client.get_rate_limit_stats()
-    logger.info("\nRate Limit Status:")
-    logger.info(f"  Total requests this month: {stats['total_requests_this_month']}/500")
-    logger.info(f"  Requests today: {stats['requests_today']}/{stats['daily_limit']}")
-    logger.info(f"  Remaining today: {stats['remaining_today']}")
-    logger.info(f"  Estimated remaining this month: {stats['estimated_remaining_month']}")
-    
-    if stats['remaining_today'] == 0:
-        logger.error("Daily quota exhausted. Please try again tomorrow.")
-        return False
-    
-    collected_count = 0
-    failed_symbols = []
-    
-    # Collect data for each symbol
-    for symbol in Config.SYMBOLS:
-        logger.info(f"\nFetching historical data for {symbol}...")
-        
-        data = client.get_historical_data(symbol, days=Config.HISTORY_DAYS)
-        
-        if data:
-            collected_count += 1
-            logger.info(f"✓ Successfully collected data for {symbol}")
-        else:
-            failed_symbols.append(symbol)
-            logger.error(f"✗ Failed to collect data for {symbol}")
-        
-        # Check if we still have quota
-        remaining = client.get_rate_limit_stats()['remaining_today']
-        if remaining == 0:
-            logger.warning("Daily quota exhausted. Stopping collection.")
-            break
-    
-    logger.info("\n" + "=" * 60)
-    logger.info(f"Data collection complete: {collected_count}/{len(Config.SYMBOLS)} symbols")
-    if failed_symbols:
-        logger.warning(f"Failed symbols: {failed_symbols}")
-    logger.info("=" * 60)
-    
-    return len(failed_symbols) == 0
+def cmd_status() -> None:
+    models = sorted(config.MODEL_DIR.glob("*.keras"))
+    scalers = sorted(config.SCALER_DIR.glob("*.pkl"))
+    raw = sorted(config.RAW_DIR.glob("*.csv"))
+    reports = sorted(config.REPORT_DIR.glob("*.json"))
 
+    print(f"\nModel version : {config.MODEL_VERSION}")
+    print(f"Architecture  : LSTM({config.LSTM_UNITS}) x {config.LSTM_LAYERS}, "
+          f"time step {config.TIME_STEP}, target '{config.TARGET_MODE}'")
+    print(f"Mongo         : {'configured' if config.MONGODB_URI else 'NOT configured'}")
+    print(f"\nTrained models ({len(models)}):")
+    for m in models:
+        print(f"  {m.stem}")
+    print(f"Scalers: {len(scalers)}   Cached series: {len(raw)}   Reports: {len(reports)}")
 
-def process_data() -> bool:
-    """
-    Process raw API data into ML-ready datasets.
-    
-    Process:
-    1. Load raw JSON for each symbol
-    2. Parse into DataFrame
-    3. Compute technical indicators
-    4. Save processed CSV
-    
-    Returns:
-        True if all symbols processed successfully, False otherwise
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("PHASE 2: DATA PROCESSING")
-    logger.info("=" * 60)
-    
-    client = IndianAPIClient()
-    processor = DataProcessor()
-    
-    processed_count = 0
-    failed_symbols = []
-    
-    for symbol in Config.SYMBOLS:
-        logger.info(f"\nProcessing {symbol}...")
-        
+    for r in reports:
         try:
-            # Load raw data (from API or saved file)
-            raw_data = client.load_raw_data(symbol)
-            if not raw_data:
-                logger.warning(f"No raw data found for {symbol}")
-                failed_symbols.append(symbol)
-                continue
-            
-            # Convert to DataFrame
-            df = processor.process_raw_data(raw_data, symbol)
-            if df is None:
-                failed_symbols.append(symbol)
-                continue
-            
-            # Compute indicators
-            df = processor.compute_technical_indicators(df)
-            
-            # Save processed data
-            processor.save_processed_data(df, symbol)
-            
-            processed_count += 1
-            logger.info(f"✓ Successfully processed {symbol}")
-            
-        except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
-            failed_symbols.append(symbol)
-    
-    logger.info("\n" + "=" * 60)
-    logger.info(f"Data processing complete: {processed_count}/{len(Config.SYMBOLS)} symbols")
-    if failed_symbols:
-        logger.warning(f"Failed symbols: {failed_symbols}")
-    logger.info("=" * 60)
-    
-    return len(failed_symbols) == 0
+            data = json.loads(r.read_text())
+            m = data.get("model", {})
+            b = data.get("baseline", {})
+            print(f"\n  {r.stem}: MAPE {m.get('mape', float('nan')):.3f}% "
+                  f"(naive {b.get('mape', float('nan')):.3f}%), "
+                  f"direction {m.get('directionAccuracy', float('nan')):.1f}%, "
+                  f"publish={data.get('beats', data.get('beatsBaseline'))}")
+        except Exception:  # noqa: BLE001
+            pass
+    print()
 
 
-def train_models() -> bool:
-    """
-    Train LSTM models for each symbol.
-    
-    Process:
-    1. Load processed data for each symbol
-    2. Create sequences for time-series modeling
-    3. Normalize features
-    4. Split into train/val/test
-    5. Train LSTM model
-    6. Evaluate on test set
-    7. Save trained model
-    
-    Returns:
-        True if training successful, False otherwise
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("PHASE 3: MODEL TRAINING")
-    logger.info("=" * 60)
-    
-    processor = DataProcessor()
-    
-    trained_count = 0
-    failed_symbols = []
-    
-    for symbol in Config.SYMBOLS:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Training model for {symbol}")
-        logger.info(f"{'='*60}")
-        
+def cmd_backtest(symbols: list[str], epochs: int) -> None:
+    import features as F
+    import backtest as B
+    import predict as P
+
+    for symbol in symbols:
+        df, feature_cols = P.prepare(symbol)
+        result = B.walk_forward(df, feature_cols, epochs=epochs, verbose=True)
+        m, b, l = result["model"], result["baseline"], result["baselineLinear"]
+
+        print(f"\n=== {symbol} ===")
+        print(f"{'metric':<20}{'LSTM':>12}{'naive':>12}{'linear':>12}")
+        for k in ("mape", "rmse", "mae", "r", "directionAccuracy"):
+            print(f"{k:<20}{m[k]:>12.4f}{b[k]:>12.4f}{l[k]:>12.4f}")
+        print(f"\npasses publication gate: {result['beatsBaseline']}  {result['gate']}")
+
+        out = config.REPORT_DIR / f"{symbol.upper()}_backtest.json"
+        out.write_text(json.dumps(
+            {k: v for k, v in result.items() if k != "sample"} | {"sample": result["sample"][-40:]},
+            indent=1, default=str,
+        ))
+        log.info("report -> %s", out)
+
+
+def cmd_leak_check(symbols: list[str], epochs: int) -> None:
+    """Shuffled-target canary: performance must collapse to baseline."""
+    import backtest as B
+    import predict as P
+
+    for symbol in symbols:
+        df, feature_cols = P.prepare(symbol)
+        real = B.walk_forward(df, feature_cols, epochs=epochs)
+        fake = B.shuffled_target_check(df, feature_cols, epochs=epochs)
+
+        print(f"\n=== leakage check: {symbol} ===")
+        print(f"  real target    : MAPE {real['model']['mape']:.3f}%  "
+              f"direction {real['model']['directionAccuracy']:.1f}%")
+        print(f"  shuffled target: MAPE {fake['shuffledMape']:.3f}%  "
+              f"direction {fake['shuffledDirectionAccuracy']:.1f}%")
+        # With no leakage the shuffled run should be far worse and its
+        # direction accuracy should sit at chance.
+        suspicious = fake["shuffledDirectionAccuracy"] > 55 or fake["shuffledMape"] < real["model"]["mape"] * 2
+        print(f"  verdict: {'SUSPICIOUS - investigate leakage' if suspicious else 'OK - no leakage detected'}")
+
+
+def cmd_train(symbols: list[str], epochs: int, publish: bool, no_backtest: bool) -> None:
+    import predict as P
+    import model as M
+
+    db = None
+    if publish:
+        import publish as PUB
+        client = PUB.get_client()
+        if client is not None:
+            db = client[config.MONGODB_DB]
+            PUB.ensure_indexes(db)
+
+    # Train the shared base first, then warm-start the rest from it
+    # (Hiransha et al. showed NSE models transfer across stocks).
+    base_model = None
+    ordered = sorted(symbols, key=lambda s: s.upper() != config.BASE_MODEL_SYMBOL)
+
+    for i, symbol in enumerate(ordered):
+        started = time.time()
         try:
-            # Load processed data
-            df = processor.load_processed_data(symbol)
-            if df is None:
-                logger.warning(f"No processed data found for {symbol}")
-                failed_symbols.append(symbol)
-                continue
-            
-            # Create sequences
-            X, y = processor.create_sequences(
-                df,
-                sequence_length=Config.SEQUENCE_LENGTH,
-                target_col="close",
+            result = P.train_symbol(
+                symbol, epochs=epochs, run_backtest=not no_backtest,
+                base_model=base_model if i > 0 else None,
             )
-            
-            if len(X) < 100:
-                logger.error(f"Insufficient sequences for {symbol} ({len(X)} < 100)")
-                failed_symbols.append(symbol)
-                continue
-            
-            # Normalize
-            X = processor.normalize_data(X, fit=True)
-            
-            # Split
-            X_train, X_val, X_test, y_train, y_val, y_test = processor.split_dataset(
-                X, y,
-                test_size=Config.TEST_SPLIT,
-                validation_size=Config.VALIDATION_SPLIT,
-            )
-            
-            # Build and train model
-            input_shape = (Config.SEQUENCE_LENGTH, X.shape[-1])
-            model = StockPricePredictor(input_shape)
-            
-            logger.info(f"\nTraining LSTM model for {symbol}...")
-            train_results = model.train(
-                X_train, y_train,
-                X_val, y_val,
-                symbol=symbol,
-            )
-            
-            # Evaluate
-            logger.info(f"\nEvaluating model for {symbol}...")
-            test_results = model.evaluate(X_test, y_test)
-            
-            # Save
-            model.save(name=symbol)
-            
-            # Log summary
-            logger.info(f"\n✓ Model training complete for {symbol}")
-            logger.info(f"  Train loss: {train_results['loss']:.6f}")
-            logger.info(f"  Val loss: {train_results['val_loss']:.6f}")
-            logger.info(f"  Test RMSE: {test_results['rmse']:.6f}")
-            logger.info(f"  Test MAPE: {test_results['mape']:.2f}%")
-            
-            trained_count += 1
-            
-        except Exception as e:
-            logger.error(f"Error training model for {symbol}: {e}", exc_info=True)
-            failed_symbols.append(symbol)
-    
-    logger.info("\n" + "=" * 60)
-    logger.info(f"Model training complete: {trained_count}/{len(Config.SYMBOLS)} symbols")
-    if failed_symbols:
-        logger.warning(f"Failed symbols: {failed_symbols}")
-    logger.info("=" * 60)
-    
-    return len(failed_symbols) == 0
+            if i == 0:
+                base_model = result.get("model")
+
+            log.info("%s trained in %.0fs", symbol, time.time() - started)
+
+            if db is not None:
+                import publish as PUB
+                prediction = P.predict_next_day(symbol, use_cache=True)
+                prediction["trainedAt"] = result.get("trainedAt")
+                PUB.publish_symbol(db, prediction, result.get("backtest"))
+                df, _ = P.prepare(symbol, use_cache=True)
+                PUB.publish_ohlcv(db, symbol, df)
+        except Exception as exc:  # noqa: BLE001
+            # One bad symbol must not abort the nightly run.
+            log.error("%s failed: %s", symbol, exc)
 
 
-def make_predictions() -> bool:
-    """
-    Make predictions for all configured symbols.
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    logger.info("=" * 60)
-    logger.info("MAKING PREDICTIONS")
-    logger.info("=" * 60)
-    
-    try:
-        predictor = StockPredictor()
-        predictions = predictor.predict_all_symbols()
-        predictor.print_predictions(predictions)
-        return True
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}", exc_info=True)
-        return False
+def cmd_predict(symbols: list[str], publish: bool) -> None:
+    import predict as P
+
+    db = None
+    if publish:
+        import publish as PUB
+        client = PUB.get_client()
+        if client is not None:
+            db = client[config.MONGODB_DB]
+            PUB.ensure_indexes(db)
+
+    for symbol in symbols:
+        try:
+            prediction = P.predict_next_day(symbol)
+            if not prediction.get("isModelBacked"):
+                log.warning("%s: %s", symbol, prediction.get("unavailableReason"))
+            else:
+                log.info(
+                    "%s: %.2f -> %.2f (%+.2f%%)",
+                    symbol, prediction["basePrice"], prediction["predictedClose"],
+                    prediction["predictedChangePercent"],
+                )
+
+            if db is not None:
+                import publish as PUB
+                report = config.REPORT_DIR / f"{symbol.upper()}_backtest.json"
+                bt = json.loads(report.read_text()) if report.exists() else None
+                PUB.publish_symbol(db, prediction, bt)
+        except Exception as exc:  # noqa: BLE001
+            log.error("%s failed: %s", symbol, exc)
 
 
-
-    """Display current rate limit status without making requests."""
-    logger.info("\n" + "=" * 60)
-    logger.info("RATE LIMIT STATUS")
-    logger.info("=" * 60)
-    
-    client = IndianAPIClient()
-    stats = client.get_rate_limit_stats()
-    
-    print()
-    print(f"Monthly quota (500 requests):")
-    print(f"  Used: {stats['total_requests_this_month']}")
-    print(f"  Remaining: {stats['estimated_remaining_month']}")
-    print(f"  Percentage: {stats['total_requests_this_month']/5:.1f}%")
-    print()
-    print(f"Today's quota ({stats['daily_limit']} requests):")
-    print(f"  Used: {stats['requests_today']}")
-    print(f"  Remaining: {stats['remaining_today']}")
-    print()
-    print("=" * 60)
-
-
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Stock price prediction pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py --collect       # Collect data from IndianAPI
-  python main.py --train         # Train models on processed data
-  python main.py --full          # Full pipeline: collect + process + train
-  python main.py --status        # Check rate limit status
-        """,
-    )
-    
-    parser.add_argument(
-        "--collect",
-        action="store_true",
-        help="Collect historical data from IndianAPI",
-    )
-    parser.add_argument(
-        "--process",
-        action="store_true",
-        help="Process raw data into ML-ready datasets",
-    )
-    parser.add_argument(
-        "--train",
-        action="store_true",
-        help="Train LSTM models on processed data",
-    )
-    parser.add_argument(
-        "--full",
-        action="store_true",
-        help="Run full pipeline (collect + process + train)",
-    )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Check API rate limit status",
-    )
-    parser.add_argument(
-        "--predict",
-        action="store_true",
-        help="Make price predictions for all symbols",
-    )
-    
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Stock prediction pipeline")
+    parser.add_argument("--train", action="store_true", help="train models")
+    parser.add_argument("--predict", action="store_true", help="run inference")
+    parser.add_argument("--backtest", action="store_true", help="walk-forward validation only")
+    parser.add_argument("--leak-check", action="store_true", help="shuffled-target canary")
+    parser.add_argument("--full", action="store_true", help="train + predict + publish")
+    parser.add_argument("--status", action="store_true", help="show what exists on disk")
+    parser.add_argument("--publish", action="store_true", help="write results to MongoDB")
+    parser.add_argument("--no-backtest", action="store_true", help="skip validation when training")
+    parser.add_argument("--symbols", nargs="+", help="symbols (default: config.SYMBOLS)")
+    parser.add_argument("--symbol", help="a single symbol")
+    parser.add_argument("--epochs", type=int, default=config.EPOCHS)
     args = parser.parse_args()
-    
-    try:
-        # Validate configuration
-        Config.validate()
-        logger.info(f"Configuration loaded successfully")
-        logger.info(f"Symbols: {Config.SYMBOLS}")
-        logger.info(f"History: {Config.HISTORY_DAYS} days")
-        logger.info(f"Sequence length: {Config.SEQUENCE_LENGTH} days")
-        
-        # Full pipeline
-        if args.full:
-            collect_data()
-            process_data()
-            train_models()
-        
-        # Individual steps
-        elif args.collect:
-            collect_data()
-        elif args.process:
-            process_data()
-        elif args.train:
-            train_models()
-        elif args.predict:
-            make_predictions()
-        elif args.status:
-            show_status()
-        else:
-            parser.print_help()
-    
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Pipeline interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-        sys.exit(1)
+
+    symbols = args.symbols or ([args.symbol] if args.symbol else config.SYMBOLS)
+
+    if args.status or not any(
+        (args.train, args.predict, args.backtest, args.leak_check, args.full)
+    ):
+        cmd_status()
+        return
+
+    started = datetime.now(timezone.utc)
+    log.info("pipeline start: %s | symbols=%s", started.isoformat(timespec="seconds"), symbols)
+
+    if args.leak_check:
+        cmd_leak_check(symbols, args.epochs)
+    elif args.backtest:
+        cmd_backtest(symbols, args.epochs)
+    elif args.full:
+        cmd_train(symbols, args.epochs, publish=True, no_backtest=args.no_backtest)
+    else:
+        if args.train:
+            cmd_train(symbols, args.epochs, publish=args.publish, no_backtest=args.no_backtest)
+        if args.predict:
+            cmd_predict(symbols, publish=args.publish)
+
+    log.info("done in %.0fs", (datetime.now(timezone.utc) - started).total_seconds())
 
 
 if __name__ == "__main__":

@@ -1,487 +1,159 @@
-# Stock Price Prediction Pipeline
+# ML Pipeline
 
-Complete, production-ready Python pipeline for training LSTM models on Indian stock market data using IndianAPI.
+Next-day closing-price forecasts for NSE equities, built from three papers
+and adapted where the Indian data disagreed with them.
 
-## 🎯 Overview
-
-This pipeline provides:
-- **Efficient API data collection** with rate limiting (500 requests/month quota)
-- **Technical indicator feature engineering** (SMA, EMA, RSI)
-- **LSTM time-series models** for stock price prediction
-- **Clear separation of concerns** with modular code
-- **Comprehensive logging** to prevent quota burnout
-
-## 📋 Project Structure
+Runs **offline** — on your machine or a scheduled GitHub Action — and writes
+results into MongoDB. The Vercel API only ever reads. TensorFlow is ~600 MB
+against a 250 MB serverless limit, so it can never live in the web function.
 
 ```
-ml-pipeline/
-├── config.py              # Central configuration (API keys, symbols, parameters)
-├── api_client.py          # IndianAPI integration with rate limiting
-├── data_processor.py      # Data loading, feature engineering, preprocessing
-├── model.py               # LSTM architecture, training, evaluation
-├── main.py                # Orchestration script (CLI interface)
-├── requirements.txt       # Python dependencies
-├── README.md              # This file
-│
-├── data/
-│   ├── raw/               # Raw JSON responses from API
-│   └── processed/         # Processed CSV datasets
-├── models/                # Trained model checkpoints (.h5)
-└── logs/                  # Logging outputs (request tracking, training logs)
+Yahoo Finance ──> features ──> LSTM ──> walk-forward validation ──┐
+                                                                   ▼
+                                              MongoDB ──> Vercel API ──> UI
 ```
 
-## ⚙️ Configuration
-
-### 1. Set Environment Variable
+## Quick start
 
 ```bash
-# Linux/macOS
-export INDIANAPI_KEY="your_api_key_here"
-
-# Windows PowerShell
-$env:INDIANAPI_KEY = "your_api_key_here"
-
-# Windows CMD
-set INDIANAPI_KEY=your_api_key_here
-```
-
-### 2. Edit `config.py`
-
-Replace TODO sections with actual values from indianapi.com:
-
-```python
-# API Endpoints (verify from documentation)
-API_ENDPOINTS = {
-    "historical": "/api/historical",      # TODO: Actual endpoint
-    "quote": "/api/quote",                # TODO: Actual endpoint
-    "company": "/api/company",            # TODO: Actual endpoint
-}
-
-# Symbols to track
-SYMBOLS = ["TCS", "HDFC", "RELIANCE", "WIPRO", "INFY"]
-
-# Model parameters
-SEQUENCE_LENGTH = 10        # Look back 10 days
-LSTM_UNITS = 64           # LSTM cell size
-EPOCHS = 50               # Training epochs
-```
-
-## 🚀 Quick Start
-
-### 1. Install Dependencies
-
-```bash
+cd ml-pipeline
 pip install -r requirements.txt
+
+python main.py --status                          # what exists on disk
+python main.py --backtest --symbol RELIANCE      # validate (~11 min)
+python main.py --train --symbol RELIANCE         # train + validate + save
+python main.py --predict --publish               # daily inference -> Mongo
+python main.py --full                            # everything, all symbols
+python main.py --leak-check --symbol RELIANCE    # leakage canary
 ```
 
-### 2. Check Rate Limit Status
+`MONGODB_URI` is optional; without it everything runs and reports locally,
+it just does not publish.
 
-```bash
-python main.py --status
-```
+## What the papers prescribe, and where this departs
 
-Output:
-```
-Monthly quota (500 requests):
-  Used: 0
-  Remaining: 500
-  Percentage: 0.0%
+**Bhandari et al. (2022)**, *Predicting stock market index using LSTM* —
+the primary blueprint. A **single** LSTM layer of 150 units beat every
+multilayer variant they tested (test MAPE 0.80%, R 0.9976). Features are
+grouped into fundamental / macroeconomic / technical, selected by dropping
+one of any pair correlating above 0.80, denoised with a Haar wavelet, and
+min–max scaled.
 
-Today's quota (10 requests):
-  Used: 0
-  Remaining: 10
-```
+**Hiransha M et al. (2018)**, *NSE Stock Market Prediction Using
+Deep-Learning Models* — NSE-specific evidence. ARIMA scored 19.6–24.7%
+MAPE against 3.85–11.6% for deep networks, and a model trained on one NSE
+stock transferred to others (and to NYSE), which is why `BASE_MODEL_SYMBOL`
+is trained first and the rest warm-start from it.
 
-### 3. Collect Data
+**Moghar & Hamiche (2020)** — documents that an LSTM loses tracking when
+the volatility regime shifts. That is the argument for walk-forward
+validation instead of a single split.
 
-```bash
-python main.py --collect
-```
+### Two deliberate departures, both driven by measurements on this data
 
-This will:
-- Fetch historical data for each symbol
-- Save raw JSON locally (`data/raw/`)
-- Log all requests for quota tracking
-- Respect daily rate limits
+**1. The target is a log return, not a price level.**
 
-### 4. Process Data
+Bhandari normalise the full series *before* splitting (their §4.5), which
+leaks the future min/max into training. Doing it correctly — fitting the
+scaler on the training slice only — exposes the problem: on RELIANCE,
+**90–100% of test closes fall outside the training min–max range**, so the
+network is asked to emit scaled values above 1, which it structurally
+cannot do. Measured walk-forward MAPE was **6.85%** against a 1.03% naive
+baseline.
 
-```bash
-python main.py --process
-```
+Switching the target to `log(close_t / close_t-1)` — stationary, std 0.0194
+in the first half vs 0.0141 in the second — cut that to **1.13%**.
 
-This will:
-- Load raw JSON files
-- Parse into DataFrames
-- Compute technical indicators (SMA, EMA, RSI)
-- Save processed CSVs (`data/processed/`)
+**2. Every feature is scale-free.**
 
-### 5. Train Models
+Feeding price *levels* alongside a return target reintroduces the same
+extrapolation problem on the input side. Replacing them with returns,
+ratios and bounded oscillators improved direction accuracy from ~49% to
+**52%**.
 
-```bash
-python main.py --train
-```
+## Results (RELIANCE, 4 walk-forward windows, 2,474 daily bars)
 
-This will:
-- Load processed data
-- Create sequences for time-series modeling
-- Split into train/val/test
-- Train LSTM models
-- Save trained models (`models/`)
+| metric | LSTM | naive-drift | linear-drift |
+|---|---|---|---|
+| MAPE | 1.052% | **1.034%** | 1.164% |
+| RMSE | 18.30 | **18.03** | 19.89 |
+| R | 0.9917 | 0.9919 | 0.9903 |
+| **Direction accuracy** | **52.05%** | 49.02% | 49.84% |
 
-### 6. Run Full Pipeline
+Read this honestly: the model does **not** beat "tomorrow equals today" on
+error, and it never will by much — daily closes are close to a random walk,
+which is exactly why a 1% MAPE is much less impressive than it sounds. Where
+it does show real skill is **direction**, 3 points above the baseline and
+above chance.
 
-```bash
-python main.py --full
-```
-
-Runs all steps (collect → process → train) in sequence.
-
-## 📊 Data Flow
+That is why the publication gate has two criteria (`backtest.py`):
 
 ```
-IndianAPI
-   ↓
-[api_client.py] → Raw JSON files (data/raw/*.json)
-   ↓
-[data_processor.py] → Processed CSV (data/processed/*.csv)
-   ↓
-Feature Engineering: OHLCV + SMA + EMA + RSI + Technical Indicators
-   ↓
-Sequence Creation: (10 days features) → next day's close price
-   ↓
-Train/Val/Test Split (chronological order to prevent data leakage)
-   ↓
-[model.py] → LSTM Training → Trained Model (models/*.h5)
-   ↓
-Evaluation: MAE, RMSE, MAPE metrics
+MAPE     <= baseline MAPE x 1.02     # not materially worse on error
+direction >= 51%                     # genuine directional skill
 ```
 
-## 🔧 Module Details
-
-### `config.py`
-Central configuration with TODO markers for API-specific values:
-- API credentials and endpoints
-- Symbol list
-- Rate limiting parameters (500/month quota, 10/day)
-- Model hyperparameters
-- Feature engineering settings
-- Data paths
-
-**TODO Items:**
-- Verify exact endpoint paths from indianapi.com API docs
-- Verify parameter names (symbol format, date ranges)
-- Verify response JSON structure
-
-### `api_client.py`
-Handles all API interactions:
-- **Rate limiting**: Tracks requests in `logs/request_log.json`, enforces daily/monthly limits
-- **Error handling**: Automatic retry with exponential backoff
-- **Local storage**: Saves raw JSON responses to `data/raw/`
-- **Request logging**: Detailed logs prevent accidental quota burnout
-
-**Key Features:**
-- Check rate limit before each request
-- Retry failed requests automatically
-- Save all responses locally for later processing
-- Log detailed statistics
-
-**Usage:**
-```python
-from api_client import IndianAPIClient
-
-client = IndianAPIClient()
-
-# Get historical data (consumes 1 request)
-data = client.get_historical_data("TCS", days=60)
-
-# Check remaining quota
-stats = client.get_rate_limit_stats()
-print(f"Remaining today: {stats['remaining_today']}")
-```
-
-### `data_processor.py`
-Converts raw API data to ML-ready datasets:
-- **Parsing**: Raw JSON → DataFrame
-- **Indicators**: SMA, EMA, RSI, ROC, volatility
-- **Sequences**: Create time-series windows (10 days → 1 prediction)
-- **Normalization**: Zero-mean, unit-variance scaling
-- **Splitting**: Train/val/test split (chronological order)
-
-**Key Functions:**
-```python
-processor = DataProcessor()
-
-# Parse raw data
-df = processor.process_raw_data(raw_json, "TCS")
-
-# Add technical indicators
-df = processor.compute_technical_indicators(df)
-
-# Create sequences: (10 days) → next day's price
-X, y = processor.create_sequences(df, sequence_length=10)
-
-# Normalize features
-X = processor.normalize_data(X, fit=True)
-
-# Split chronologically (prevent future data leakage)
-X_train, X_val, X_test, y_train, y_val, y_test = processor.split_dataset(
-    X, y, test_size=0.1, validation_size=0.2
-)
-```
-
-### `model.py`
-LSTM model for time-series prediction:
-- **Architecture**: 2-layer LSTM with dropout, dense output
-- **Training**: Adam optimizer, MSE loss, early stopping
-- **Evaluation**: MAE, RMSE, MAPE metrics
-- **Checkpointing**: Saves best model during training
-
-**Key Functions:**
-```python
-# Build model
-model = StockPricePredictor(input_shape=(10, num_features))
-
-# Train
-results = model.train(X_train, y_train, X_val, y_val, symbol="TCS")
-
-# Evaluate
-metrics = model.evaluate(X_test, y_test)
-print(f"RMSE: {metrics['rmse']:.4f}, MAPE: {metrics['mape']:.2f}%")
-
-# Predict
-predictions = model.predict(X_new)
-
-# Save/Load
-model.save("TCS")
-loaded = StockPricePredictor.load("TCS")
-```
-
-### `main.py`
-Orchestration script with CLI:
-- **--collect**: Fetch data from IndianAPI
-- **--process**: Process raw data
-- **--train**: Train LSTM models
-- **--full**: Run all steps
-- **--status**: Check rate limits
-
-## 📈 Expected Output
-
-### Training Log
-```
-============================================================
-PHASE 3: MODEL TRAINING
-============================================================
-
-Training model for TCS
-============================================================
-Model Summary
-...
-Creating 42 sequences (length=10)
-✓ Created 42 sequences (length=10)
-  X shape: (42, 10, 13), y shape: (42,)
-
-✓ Dataset split:
-  Train: 30 samples (71.4%)
-  Validation: 6 samples (14.3%)
-  Test: 6 samples (14.3%)
-
-Starting training...
-Epoch 1/50
-...
-Epoch 30/50
-...
-✓ Training complete
-  Final loss: 0.001234
-  Final val_loss: 0.002456
-  Final MAE: 0.008765
-  Final val_MAE: 0.009876
-
-✓ Test Results:
-  Loss (MSE): 0.002500
-  MAE: 0.009500
-  RMSE: 0.050000
-  MAPE: 0.75%
-
-✓ Saved model to models/TCS.h5
-```
-
-## 🛡️ Rate Limiting
-
-The pipeline respects IndianAPI's 500 requests/month quota:
-
-- **Daily limit**: 10 requests/day (conservative to stay under 500/month)
-- **Request tracking**: All requests logged to `logs/request_log.json`
-- **Daily reset**: Quota resets at midnight UTC
-- **Quota check**: Every request verified before making API call
-
-**Example:**
-```bash
-python main.py --status
-# Output:
-# Monthly quota (500 requests):
-#   Used: 25
-#   Remaining: 475
-#   Percentage: 5.0%
-# 
-# Today's quota (10 requests):
-#   Used: 3
-#   Remaining: 7
-```
-
-If quota exhausted:
-```
-2024-12-18 15:30:45 - api_client - WARNING - Daily request limit reached (10)
-Error: Rate limit exceeded for today
-```
-
-## ⚠️ Important: Fill in TODO Items
-
-Before running the pipeline, update these items in `config.py`:
-
-1. **API Endpoints** (line ~35)
-   ```python
-   API_ENDPOINTS = {
-       "historical": "/api/???",  # TODO: Check indianapi.com docs
-       "quote": "/api/???",
-       "company": "/api/???",
-   }
-   ```
-
-2. **Symbol Format** (line ~20)
-   ```python
-   SYMBOLS = [
-       "TCS",  # TODO: Verify format (TCS vs TCS.NS vs other)
-       ...
-   ]
-   ```
-
-3. **Response Parsing** in `data_processor.py` (line ~50)
-   ```python
-   # TODO: Verify actual JSON structure:
-   # Your API might return:
-   # {"data": [...]}           or
-   # {"candles": [...]}        or
-   # {"OHLC": [...]}           or
-   # Different field names
-   ```
-
-4. **Authentication** in `api_client.py` (line ~95)
-   ```python
-   # TODO: Verify auth method:
-   # "Authorization": f"Bearer {self.api_key}"  or
-   # Add as query param: "api_key": self.api_key  or
-   # Other method
-   ```
-
-## 🔍 Example Workflow
-
-```bash
-# 1. Check environment
-export INDIANAPI_KEY="your_key"
-
-# 2. See current quota
-python main.py --status
-# Monthly quota (500 requests):
-#   Used: 0
-#   Remaining: 500
-
-# 3. Collect 5 symbols (5 requests)
-python main.py --collect
-# Fetches: TCS, HDFC, RELIANCE, WIPRO, INFY
-# Saves to: data/raw/*.json
-
-# 4. Process data (no API calls)
-python main.py --process
-# Computes indicators
-# Saves to: data/processed/*.csv
-
-# 5. Train models (no API calls)
-python main.py --train
-# Trains LSTM for each symbol
-# Saves to: models/*.h5
-
-# 6. Next day (after quota reset)
-python main.py --full
-# Collect new day's data + retrain models
-```
-
-## 📊 Performance Tips
-
-1. **Reuse Processed Data**: Process once, train multiple times
-   ```bash
-   python main.py --train  # No API calls, uses saved CSVs
-   ```
-
-2. **Add More Features**: Edit `data_processor.compute_technical_indicators()`
-   - Bollinger Bands, MACD, Stochastic oscillator, etc.
-   - More features = more model capacity
-
-3. **Tune Model Architecture**: Edit `config.py`
-   - Increase `LSTM_UNITS` for larger models
-   - Add more `LSTM_LAYERS` for deeper networks
-   - Adjust `SEQUENCE_LENGTH` (longer = more context)
-
-4. **Monitor Training**: Check `logs/model.log` during training
-   - If val_loss increasing = overfitting
-   - Add more dropout or reduce LSTM_UNITS
-
-## 🐛 Debugging
-
-Check logs in `logs/` directory:
-- `api_client.log`: API requests and rate limiting
-- `data_processor.log`: Data processing steps
-- `model.log`: Training progress
-- `pipeline.log`: Overall execution
-- `request_log.json`: Detailed request tracking
-
-**Common Issues:**
-
-| Issue | Solution |
-|-------|----------|
-| "INDIANAPI_KEY not set" | Set environment variable: `export INDIANAPI_KEY="..."`|
-| "Daily request limit reached" | Wait until tomorrow (quota resets at midnight UTC) |
-| "Invalid raw data structure" | Update `process_raw_data()` to match API response |
-| "No processed data found" | Run `python main.py --process` first |
-| "TensorFlow not installed" | `pip install tensorflow` |
-
-## 📚 References
-
-- IndianAPI Docs: TODO - Add documentation link
-- LSTM Tutorial: https://colah.github.io/posts/2015-08-Understanding-LSTMs/
-- Stock Market Data: Common OHLCV + Technical Indicators
-- Time-Series Forecasting: Sequence-to-value approach (look back 10 days, predict 1 day ahead)
-
-## 📝 Next Steps
-
-1. Fill in TODO items in `config.py` and `api_client.py`
-2. Test with `python main.py --status`
-3. Collect initial dataset: `python main.py --collect`
-4. Train models: `python main.py --train`
-5. Extend with more indicators or symbols as needed
-
-## 💡 Extending the Pipeline
-
-**Add New Symbol:**
-```python
-# config.py
-SYMBOLS = ["TCS", "HDFC", "RELIANCE", "WIPRO", "INFY", "YOUR_SYMBOL"]
-```
-
-**Add New Indicator:**
-```python
-# data_processor.py - in compute_technical_indicators()
-df["your_indicator"] = df["close"].rolling(window=5).mean()
-```
-
-**Try Different Model:**
-```python
-# model.py - replace LSTM with GRU or Transformer
-layers.GRU(Config.LSTM_UNITS, return_sequences=True)
-```
-
----
-
-**Created:** December 18, 2025  
-**Status:** Production-ready  
-**Python Version:** 3.8+
+A model failing either is stored with `isModelBacked: false` and a reason,
+and the UI renders that reason instead of a number.
+
+## Avoiding look-ahead bias
+
+Three specific traps, each enough on its own to manufacture an impressive
+result that would evaporate live:
+
+1. **Scaler leakage** — `MinMaxScaler` is fit on the training slice only,
+   re-fit per walk-forward fold.
+2. **Denoising leakage** — the Haar transform is not causal. A single global
+   pass smears future information backwards; measured, it moved past values
+   by up to 1.83 at non-dyadic cut points. `denoise_causal()` denoises each
+   point using only data at or before it (verified: appending future data
+   changes earlier outputs by exactly 0).
+3. **Sequence leakage** — `make_sequences` places the target strictly after
+   the end of its input window.
+
+Verify with `--leak-check`: it reruns the backtest against a randomly
+permuted target. Performance must collapse to chance. If a shuffled target
+still predicts well, something is leaking and every other number is void.
+
+## Files
+
+| File | Role |
+|---|---|
+| `config.py` | Hyperparameters, symbol universe, feature list, thresholds |
+| `data_client.py` | Yahoo fetch with retry/backoff and a CSV cache |
+| `indicators.py` | RSI/MACD/ATR/SMA/EMA/Bollinger — mirrors the Node version |
+| `features.py` | Haar denoising, feature engineering, selection, scaling |
+| `model.py` | Single-layer LSTM(150), training, transfer learning |
+| `backtest.py` | Walk-forward validation, baselines, publication gate |
+| `predict.py` | Train a symbol; next-day inference |
+| `publish.py` | Write predictions, backtests and OHLCV to MongoDB |
+| `main.py` | CLI |
+
+`indicators.py` and `backend/src/services/indicators.js` must agree
+numerically — the UI would otherwise contradict the model.
+`tests/test_indicators.py` asserts this against a shared fixture and
+currently passes to floating-point precision.
+
+## Indian adaptation of the macro block
+
+Bhandari's macro features are US series (VIX, EFFR, UNRATE, UMCSENT, USDX).
+The free daily Indian equivalents:
+
+| Bhandari | Here | Ticker |
+|---|---|---|
+| VIX | India VIX | `^INDIAVIX` |
+| USDX | USD/INR | `USDINR=X` |
+| — | NIFTY 50 | `^NSEI` |
+| EFFR / UNRATE / UMCSENT | *omitted* | no free daily feed; a forward-filled monthly series adds little at a one-day horizon |
+
+India VIX is fetched but usually **dropped by feature selection** —
+it correlates 0.87 with the stock's own relative ATR, so it is a duplicate
+feature by Bhandari's own 0.80 rule.
+
+## Caveats
+
+- Yahoo Finance is unofficial, has no SLA, and rate-limits with HTTP 429.
+  Retry/backoff and a 12-hour CSV cache mitigate it.
+- These forecasts are for research and education. A next-day price
+  prediction that barely beats a random walk is not a trading strategy, and
+  nothing here is investment advice.

@@ -2,6 +2,35 @@
 
 Complete step-by-step guide to deploy StockPulse to Vercel with separate frontend and backend deployments.
 
+## ✅ Recommended (Single Vercel Project)
+
+This repository now supports a single Vercel deployment from the project root using [vercel.json](vercel.json).
+
+- Frontend is built from `frontend` and served as static assets.
+- Backend runs from `backend/api/index.js` as a serverless function.
+- API calls work on the same domain via `/api/*` rewrites.
+
+### Quick Deploy Steps
+
+1. Import this repo in Vercel (Root Directory: project root).
+2. Keep defaults from `vercel.json` (no custom build/output needed).
+3. Set environment variables in Vercel project settings:
+   - `MONGODB_URI`
+   - `NODE_ENV=production`
+   - `INDIAN_API_KEY` (if using live Indian API)
+   - `INDIAN_API_BASE_URL=https://stock.indianapi.in`
+   - `FRONTEND_URL=https://<your-project>.vercel.app` (optional)
+4. Deploy.
+5. Verify:
+   - `https://<your-project>.vercel.app/api/health`
+   - App homepage loads stock data without CORS errors.
+
+### Local Dev Ports
+
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:5000`
+- Vite proxy forwards `/api` to backend automatically.
+
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)

@@ -1,59 +1,101 @@
-import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Search, Heart } from 'lucide-react';
+import React from 'react';
+import { motion } from 'framer-motion';
+import { TrendingUp, TrendingDown } from 'lucide-react';
+import AnimatedNumber from './ui/AnimatedNumber';
+import {
+  formatPrice, formatPercent, formatChange, formatVolume, percentOfRange, DASH,
+} from '../utils/formatting';
 
-const StockCard = ({ stock, onSelect, onWatchlist }) => {
-  const isPositive = stock.change_percent >= 0;
-  const changeSymbol = isPositive ? '▲' : '▼';
+/**
+ * Stock summary card.
+ *
+ * Uses the canonical quote field names (price / changePercent / high / low)
+ * that every provider now normalises to, replacing the snake_case guesswork
+ * the old card relied on. Missing values render as an em dash rather than
+ * "0.00", so absent data never reads as a real zero.
+ *
+ * The `layoutId` lets the symbol morph into the details-page heading via
+ * framer-motion's shared layout animation.
+ */
+const StockCard = ({ stock, onClick }) => {
+  const positive = (stock.changePercent ?? 0) >= 0;
+  const rangePos = percentOfRange(stock.price, stock.low, stock.high);
 
   return (
-    <div
-      onClick={() => onSelect(stock.symbol)}
-      className="glass-effect card-hover p-6 rounded-xl cursor-pointer group"
+    <motion.div
+      onClick={() => onClick?.(stock)}
+      whileHover={{ y: -4 }}
+      whileTap={{ scale: 0.985 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(stock); }
+      }}
+      className="glass-effect p-5 rounded-2xl cursor-pointer group border border-white/10 hover:border-accent-blue/40 transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue/50"
     >
-      <div className="flex justify-between items-start mb-4">
-        <div>
-          <h3 className="text-lg font-bold text-white group-hover:text-accent-light transition">
-            {stock.symbol || stock.company_name}
-          </h3>
-          <p className="text-sm text-text-secondary mt-1">
-            {stock.company_name}
+      <div className="flex justify-between items-start mb-4 gap-2">
+        <div className="min-w-0">
+          <motion.h3
+            layoutId={`symbol-${stock.symbol}`}
+            className="text-lg font-bold text-white group-hover:text-accent-blue transition-colors truncate"
+          >
+            {stock.symbol}
+          </motion.h3>
+          <p className="text-sm text-white/45 mt-0.5 line-clamp-1">
+            {stock.name ?? DASH}
           </p>
         </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onWatchlist(stock);
-          }}
-          className="text-text-secondary hover:text-accent-green transition"
-        >
-          <Heart size={20} />
-        </button>
-      </div>
-
-      <div className="mb-4">
-        <p className="text-2xl font-bold text-white">
-          ₹ {stock.current_price?.toFixed(2) || '0.00'}
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2">
         <span
-          className={`text-sm font-semibold flex items-center gap-1 ${
-            isPositive ? 'text-chart-up' : 'text-chart-down'
+          className={`shrink-0 flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full ${
+            positive ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'
           }`}
         >
-          {changeSymbol} {Math.abs(stock.change_percent || 0).toFixed(2)}%
-        </span>
-        <span className="text-text-secondary text-sm">
-          {isPositive ? '+' : ''} ₹ {stock.change_amount?.toFixed(2) || '0.00'}
+          {positive ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
+          {formatPercent(stock.changePercent, { signed: false })}
         </span>
       </div>
 
-      <div className="mt-4 pt-4 border-t border-border-color text-xs text-text-secondary space-y-1">
-        <p>High: ₹ {stock.day_high?.toFixed(2) || 'N/A'}</p>
-        <p>Low: ₹ {stock.day_low?.toFixed(2) || 'N/A'}</p>
+      <AnimatedNumber
+        value={stock.price}
+        format={(v) => formatPrice(v)}
+        className="text-2xl font-bold text-white block mb-1"
+      />
+      <p className={`text-sm font-medium ${positive ? 'text-accent-green' : 'text-accent-red'}`}>
+        {formatChange(stock.change)}
+      </p>
+
+      {/* Where the price sits in today's range */}
+      {rangePos !== null && (
+        <div className="mt-4">
+          <div className="relative h-1 rounded-full bg-white/8 overflow-hidden">
+            <motion.div
+              className={`absolute inset-y-0 left-0 rounded-full ${
+                positive ? 'bg-accent-green/60' : 'bg-accent-red/60'
+              }`}
+              initial={{ width: 0 }}
+              animate={{ width: `${rangePos}%` }}
+              transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="pt-3 mt-3 border-t border-white/10 grid grid-cols-3 gap-2 text-[11px]">
+        <div>
+          <p className="text-white/30">Low</p>
+          <p className="text-white/70 tabular-nums truncate">{formatPrice(stock.low)}</p>
+        </div>
+        <div className="text-center">
+          <p className="text-white/30">High</p>
+          <p className="text-white/70 tabular-nums truncate">{formatPrice(stock.high)}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-white/30">Vol</p>
+          <p className="text-white/70 tabular-nums truncate">{formatVolume(stock.volume)}</p>
+        </div>
       </div>
-    </div>
+    </motion.div>
   );
 };
 

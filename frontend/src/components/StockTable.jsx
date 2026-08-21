@@ -1,87 +1,149 @@
-import React, { useState, useEffect } from 'react';
-import { ChevronUp, ChevronDown } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { motion } from 'framer-motion';
+import { ChevronUp, ChevronDown, ArrowUpDown } from 'lucide-react';
+import {
+  formatPrice, formatPercent, formatChange, formatVolume, DASH,
+} from '../utils/formatting';
 
-const StockTable = ({ stocks, onSelectStock }) => {
-  const [sortConfig, setSortConfig] = useState({ key: 'symbol', direction: 'asc' });
+/**
+ * Sortable quote table.
+ *
+ * Fixes carried over from the previous version:
+ *  - The sort chevron was always ChevronDown regardless of direction
+ *    (ChevronUp was imported but never used), so the header lied about
+ *    the current sort.
+ *  - The "View" button had no onClick handler.
+ *  - Nulls sorted as 0, mixing missing data in with genuine zeroes.
+ */
 
-  const handleSort = (key) => {
-    let direction = 'asc';
-    if (sortConfig.key === key && sortConfig.direction === 'asc') {
-      direction = 'desc';
-    }
-    setSortConfig({ key, direction });
-  };
+const COLUMNS = [
+  { key: 'symbol', label: 'Symbol', align: 'left', sortable: true },
+  { key: 'name', label: 'Company', align: 'left', sortable: true, hideBelow: 'md' },
+  { key: 'price', label: 'Price', align: 'right', sortable: true },
+  { key: 'change', label: 'Change', align: 'right', sortable: true, hideBelow: 'sm' },
+  { key: 'changePercent', label: 'Change %', align: 'right', sortable: true },
+  { key: 'high', label: 'Day High', align: 'right', sortable: true, hideBelow: 'lg' },
+  { key: 'low', label: 'Day Low', align: 'right', sortable: true, hideBelow: 'lg' },
+  { key: 'volume', label: 'Volume', align: 'right', sortable: true, hideBelow: 'xl' },
+];
 
-  const sortedStocks = [...stocks].sort((a, b) => {
-    const aValue = a[sortConfig.key];
-    const bValue = b[sortConfig.key];
+const HIDE_CLASS = {
+  sm: 'hidden sm:table-cell',
+  md: 'hidden md:table-cell',
+  lg: 'hidden lg:table-cell',
+  xl: 'hidden xl:table-cell',
+};
 
-    if (typeof aValue === 'string') {
-      return sortConfig.direction === 'asc'
-        ? aValue.localeCompare(bValue)
-        : bValue.localeCompare(aValue);
-    }
+const StockTable = ({ stocks = [], onRowClick }) => {
+  const [sort, setSort] = useState({ key: 'changePercent', dir: 'desc' });
 
-    return sortConfig.direction === 'asc' ? aValue - bValue : bValue - aValue;
-  });
+  const sorted = useMemo(() => {
+    const rows = [...stocks];
+    const { key, dir } = sort;
+    rows.sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+      // Missing values always sink to the bottom, whichever way we sort.
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      const cmp = typeof av === 'string'
+        ? av.localeCompare(bv)
+        : av - bv;
+      return dir === 'asc' ? cmp : -cmp;
+    });
+    return rows;
+  }, [stocks, sort]);
+
+  const toggleSort = (key) =>
+    setSort((s) => ({
+      key,
+      dir: s.key === key && s.dir === 'desc' ? 'asc' : 'desc',
+    }));
 
   return (
-    <div className="glass-effect rounded-xl overflow-hidden border border-border-color">
+    <div className="glass-effect rounded-2xl border border-white/10 overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="w-full">
+        <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-border-color">
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary cursor-pointer hover:text-white transition" onClick={() => handleSort('symbol')}>
-                <div className="flex items-center gap-2">
-                  Symbol <ChevronDown size={16} />
-                </div>
-              </th>
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary cursor-pointer hover:text-white transition" onClick={() => handleSort('current_price')}>
-                <div className="flex items-center gap-2">
-                  Price <ChevronDown size={16} />
-                </div>
-              </th>
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary cursor-pointer hover:text-white transition" onClick={() => handleSort('change_percent')}>
-                <div className="flex items-center gap-2">
-                  Change <ChevronDown size={16} />
-                </div>
-              </th>
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary">Day High</th>
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary">Day Low</th>
-              <th className="px-6 py-4 text-left text-sm font-semibold text-text-secondary">Action</th>
+            <tr className="border-b border-white/10">
+              {COLUMNS.map((col) => {
+                const active = sort.key === col.key;
+                return (
+                  <th
+                    key={col.key}
+                    scope="col"
+                    aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    className={`px-4 py-3.5 text-${col.align} text-xs uppercase tracking-wider font-semibold text-white/40 whitespace-nowrap ${
+                      col.hideBelow ? HIDE_CLASS[col.hideBelow] : ''
+                    }`}
+                  >
+                    <button
+                      onClick={() => col.sortable && toggleSort(col.key)}
+                      disabled={!col.sortable}
+                      className={`inline-flex items-center gap-1 hover:text-white transition-colors ${
+                        active ? 'text-accent-blue' : ''
+                      } ${col.align === 'right' ? 'flex-row-reverse' : ''}`}
+                    >
+                      {col.label}
+                      {col.sortable && (
+                        active
+                          ? (sort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
+                          : <ArrowUpDown size={11} className="opacity-30" />
+                      )}
+                    </button>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {sortedStocks.map((stock) => {
-              const isPositive = stock.change_percent >= 0;
+            {sorted.map((stock, i) => {
+              const positive = (stock.changePercent ?? 0) >= 0;
               return (
-                <tr
+                <motion.tr
                   key={stock.symbol}
-                  className="border-b border-border-color hover:bg-primary-light/50 transition cursor-pointer"
-                  onClick={() => onSelectStock(stock.symbol)}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: Math.min(i * 0.015, 0.4) }}
+                  onClick={() => onRowClick?.(stock)}
+                  className="border-b border-white/5 last:border-0 hover:bg-white/[0.04] cursor-pointer transition-colors"
                 >
-                  <td className="px-6 py-4">
-                    <div>
-                      <p className="text-white font-semibold">{stock.symbol}</p>
-                      <p className="text-text-secondary text-sm">{stock.company_name}</p>
-                    </div>
+                  <td className="px-4 py-3.5 font-bold text-white whitespace-nowrap">
+                    {stock.symbol}
                   </td>
-                  <td className="px-6 py-4 text-white font-semibold">
-                    ₹ {stock.current_price?.toFixed(2)}
+                  <td className={`px-4 py-3.5 text-white/50 max-w-[220px] truncate ${HIDE_CLASS.md}`}>
+                    {stock.name ?? DASH}
                   </td>
-                  <td className="px-6 py-4">
-                    <span className={`font-semibold ${isPositive ? 'text-chart-up' : 'text-chart-down'}`}>
-                      {isPositive ? '▲' : '▼'} {Math.abs(stock.change_percent || 0).toFixed(2)}%
+                  <td className="px-4 py-3.5 text-right text-white font-semibold tabular-nums whitespace-nowrap">
+                    {formatPrice(stock.price)}
+                  </td>
+                  <td className={`px-4 py-3.5 text-right tabular-nums whitespace-nowrap ${HIDE_CLASS.sm} ${
+                    positive ? 'text-accent-green' : 'text-accent-red'
+                  }`}>
+                    {formatChange(stock.change)}
+                  </td>
+                  <td className="px-4 py-3.5 text-right whitespace-nowrap">
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold tabular-nums ${
+                        positive
+                          ? 'bg-accent-green/15 text-accent-green'
+                          : 'bg-accent-red/15 text-accent-red'
+                      }`}
+                    >
+                      {formatPercent(stock.changePercent)}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-white">₹ {stock.day_high?.toFixed(2)}</td>
-                  <td className="px-6 py-4 text-white">₹ {stock.day_low?.toFixed(2)}</td>
-                  <td className="px-6 py-4">
-                    <button className="px-3 py-1 bg-accent-green/20 text-accent-green rounded text-sm font-semibold hover:bg-accent-green/30 transition">
-                      View
-                    </button>
+                  <td className={`px-4 py-3.5 text-right text-white/60 tabular-nums whitespace-nowrap ${HIDE_CLASS.lg}`}>
+                    {formatPrice(stock.high)}
                   </td>
-                </tr>
+                  <td className={`px-4 py-3.5 text-right text-white/60 tabular-nums whitespace-nowrap ${HIDE_CLASS.lg}`}>
+                    {formatPrice(stock.low)}
+                  </td>
+                  <td className={`px-4 py-3.5 text-right text-white/50 tabular-nums whitespace-nowrap ${HIDE_CLASS.xl}`}>
+                    {formatVolume(stock.volume)}
+                  </td>
+                </motion.tr>
               );
             })}
           </tbody>

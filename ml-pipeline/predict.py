@@ -1,242 +1,186 @@
 """
-Prediction module for stock price forecasting.
+Training and next-day inference.
 
-Handles:
-- Loading trained models
-- Making predictions on new data
-- Interpreting prediction results
-- Confidence scoring
+The scaler bug this module exists to not repeat: the previous predict.py
+normalised during training but used an identity transform at inference
+("not normalizing for prediction"), so the network was fed raw feature
+values it had never seen in that range. Here the fitted scalers are saved
+alongside the model and reloaded for every prediction.
 """
 
+from __future__ import annotations
+
+import json
 import logging
-from typing import Dict, List, Optional, Tuple
+import pickle
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
-from config import Config
-from data_processor import DataProcessor
-from model import StockPricePredictor
+import backtest as B
+import config
+import data_client as DC
+import features as F
+import model as M
 
-# Configure logging
-logging.basicConfig(
-    level=Config.LOG_LEVEL,
-    format=Config.LOG_FORMAT,
-    handlers=[
-        logging.FileHandler(Config.LOGS_DIR / "prediction.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-class StockPredictor:
+def _scaler_path(symbol: str, version: str) -> "object":
+    return config.SCALER_DIR / f"{symbol.upper()}_{version}_scalers.pkl"
+
+
+def save_scalers(symbol: str, x_scaler, y_scaler, feature_cols, version=config.MODEL_VERSION):
+    with open(_scaler_path(symbol, version), "wb") as fh:
+        pickle.dump(
+            {"x": x_scaler, "y": y_scaler, "features": feature_cols,
+             "targetMode": config.TARGET_MODE, "timeStep": config.TIME_STEP},
+            fh,
+        )
+
+
+def load_scalers(symbol: str, version=config.MODEL_VERSION):
+    path = _scaler_path(symbol, version)
+    if not path.exists():
+        return None
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
+def prepare(symbol: str, use_cache: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Fetch bars + macro context and build the modelling frame."""
+    ohlcv = DC.fetch_ohlcv(symbol, use_cache=use_cache)
+    market = DC.fetch_market_context(use_cache=use_cache)
+    df = F.build_features(ohlcv, market, causal_denoise=True)
+    feature_cols, _ = F.select_features(df)
+    return df, feature_cols
+
+
+def train_symbol(
+    symbol: str,
+    *,
+    epochs: int = config.EPOCHS,
+    run_backtest: bool = True,
+    base_model=None,
+    use_cache: bool = True,
+) -> dict:
     """
-    End-to-end prediction pipeline for stock prices.
-    
-    Workflow:
-    1. Load trained model for symbol
-    2. Load historical data for feature extraction
-    3. Prepare latest data as input
-    4. Make prediction for next day's price
-    5. Return prediction with confidence interval
+    Train, validate and persist a model for one symbol.
+
+    Returns a summary dict including the backtest metrics and whether the
+    model cleared the publication gate.
     """
+    log.info("=== %s ===", symbol)
+    df, feature_cols = prepare(symbol, use_cache=use_cache)
+    log.info("%s: %d rows, %d features", symbol, len(df), len(feature_cols))
 
-    def __init__(self):
-        """Initialize predictor."""
-        self.processor = DataProcessor()
-        self.models = {}  # Cache for loaded models
-        self.scaler_params = {}  # Cache for normalization params
+    result = {"symbol": symbol.upper(), "featureSet": feature_cols}
 
-    def predict_next_day(self, symbol: str) -> Optional[Dict]:
-        """
-        Predict next day's closing price for a symbol.
-        
-        Args:
-            symbol: Stock symbol (e.g., "TCS")
-            
-        Returns:
-            Dict with prediction, confidence, and metadata or None if failed
-        """
-        logger.info(f"Preparing prediction for {symbol}...")
-        
-        try:
-            # Load model
-            model = self._load_model(symbol)
-            if model is None:
-                logger.error(f"Model not found for {symbol}")
-                return None
-            
-            # Load processed data
-            df = self.processor.load_processed_data(symbol)
-            if df is None:
-                logger.error(f"Processed data not found for {symbol}")
-                return None
-            
-            # Get latest sequence
-            X_latest = self._prepare_input(df, symbol)
-            if X_latest is None:
-                logger.error(f"Could not prepare input for {symbol}")
-                return None
-            
-            # Make prediction
-            prediction = model.predict(X_latest)[0][0]
-            
-            # Get current price for reference
-            current_price = df['close'].iloc[-1]
-            price_change = prediction - current_price
-            percent_change = (price_change / current_price) * 100
-            
-            # Create confidence interval
-            confidence = self._estimate_confidence(model, X_latest)
-            
-            result = {
-                "symbol": symbol,
-                "current_price": float(current_price),
-                "predicted_price": float(prediction),
-                "price_change": float(price_change),
-                "percent_change": float(percent_change),
-                "confidence": float(confidence),
-                "direction": "UP" if price_change > 0 else "DOWN",
-                "data_points": len(df),
-            }
-            
-            logger.info(f"✓ Prediction for {symbol}: {prediction:.2f} ({percent_change:+.2f}%)")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Prediction failed for {symbol}: {e}")
-            return None
+    if run_backtest:
+        bt = B.walk_forward(df, feature_cols, epochs=epochs, verbose=True)
+        result["backtest"] = bt
+        log.info(
+            "%s backtest: MAPE %.3f%% (naive %.3f%%) dir %.1f%% -> publish=%s",
+            symbol, bt["model"]["mape"], bt["baseline"]["mape"],
+            bt["model"]["directionAccuracy"], bt["beatsBaseline"],
+        )
 
-    def predict_all_symbols(self) -> List[Dict]:
-        """
-        Predict next day's prices for all configured symbols.
-        
-        Returns:
-            List of prediction dicts
-        """
-        logger.info("=" * 60)
-        logger.info("PREDICTING NEXT-DAY PRICES FOR ALL SYMBOLS")
-        logger.info("=" * 60)
-        
-        predictions = []
-        
-        for symbol in Config.SYMBOLS:
-            result = self.predict_next_day(symbol)
-            if result:
-                predictions.append(result)
-        
-        logger.info(f"\n✓ Completed predictions for {len(predictions)}/{len(Config.SYMBOLS)} symbols")
-        return predictions
+    # Final model: trained on ALL available history, since it will predict
+    # tomorrow rather than a held-out past window. The quality estimate for
+    # this model comes from the walk-forward run above.
+    clean = df.dropna(subset=feature_cols + [config.TARGET_COLUMN]).reset_index(drop=True)
+    feature_values = clean[feature_cols].to_numpy(dtype=float)
+    closes = clean[config.TARGET_COLUMN].to_numpy(dtype=float)
+    targets = B.build_target(closes, config.TARGET_MODE)
 
-    def _load_model(self, symbol: str) -> Optional[StockPricePredictor]:
-        """Load cached or new model."""
-        if symbol in self.models:
-            return self.models[symbol]
-        
-        model = StockPricePredictor.load(symbol)
-        if model:
-            self.models[symbol] = model
-        
-        return model
+    x_scaler = F.MinMaxScaler().fit(feature_values)
+    y_scaler = F.MinMaxScaler().fit(targets.reshape(-1, 1))
+    x_all, y_all = F.make_sequences(
+        x_scaler.transform(feature_values),
+        y_scaler.transform(targets.reshape(-1, 1)).ravel(),
+        config.TIME_STEP, config.HORIZON_DAYS,
+    )
 
-    def _prepare_input(self, df: pd.DataFrame, symbol: str) -> Optional[np.ndarray]:
-        """
-        Prepare latest data as input for model.
-        
-        Args:
-            df: DataFrame with all features
-            symbol: Stock symbol
-            
-        Returns:
-            Input array (1, sequence_length, num_features) or None
-        """
-        # Get last sequence_length days
-        if len(df) < Config.SEQUENCE_LENGTH:
-            logger.warning(f"Insufficient data for {symbol}: {len(df)} < {Config.SEQUENCE_LENGTH}")
-            return None
-        
-        latest_data = df.tail(Config.SEQUENCE_LENGTH)
-        
-        # Select feature columns (exclude timestamp)
-        feature_cols = [c for c in df.columns if c != "timestamp"]
-        X = latest_data[feature_cols].values.astype(np.float32)
-        
-        # Normalize using same parameters as training
-        # For now, use identity (not normalizing for prediction)
-        # In production, load scaler from saved model metadata
-        
-        # Reshape to (1, sequence_length, num_features)
-        X = X.reshape(1, Config.SEQUENCE_LENGTH, -1)
-        
-        return X
+    val_cut = int(len(x_all) * (1 - config.VALIDATION_SPLIT))
+    M.set_seeds()
+    net, history = M.train_model(
+        x_all[:val_cut], y_all[:val_cut], x_all[val_cut:], y_all[val_cut:],
+        epochs=epochs, base_model=base_model,
+    )
 
-    @staticmethod
-    def _estimate_confidence(model: StockPricePredictor, X: np.ndarray) -> float:
-        """
-        Estimate confidence level for prediction.
-        
-        Args:
-            model: Trained model
-            X: Input data
-            
-        Returns:
-            Confidence score 0-100
-        """
-        # Basic confidence: based on training loss
-        # Higher training loss → lower confidence
-        if hasattr(model, 'metadata') and 'final_val_mae' in model.metadata:
-            mae = model.metadata['final_val_mae']
-            # Convert MAE to confidence (lower error = higher confidence)
-            confidence = max(0, min(100, 100 - (mae * 100)))
-        else:
-            confidence = 75.0  # Default confidence
-        
-        return confidence
+    M.save_model(net, symbol)
+    save_scalers(symbol, x_scaler, y_scaler, feature_cols)
 
-    def print_predictions(self, predictions: List[Dict]) -> None:
-        """Print predictions in formatted table."""
-        if not predictions:
-            logger.warning("No predictions to display")
-            return
-        
-        print("\n" + "=" * 100)
-        print("NEXT-DAY PRICE PREDICTIONS")
-        print("=" * 100)
-        print(f"{'Symbol':<10} {'Current':<12} {'Predicted':<12} {'Change':<12} {'%Change':<10} {'Direction':<8} {'Confidence':<12}")
-        print("-" * 100)
-        
-        for pred in predictions:
-            symbol = pred['symbol']
-            current = pred['current_price']
-            predicted = pred['predicted_price']
-            change = pred['price_change']
-            pct = pred['percent_change']
-            direction = pred['direction']
-            conf = pred['confidence']
-            
-            # Color coding (would be actual colors in terminal)
-            direction_symbol = "↑" if direction == "UP" else "↓"
-            
-            print(f"{symbol:<10} ₹{current:<11.2f} ₹{predicted:<11.2f} "
-                  f"₹{change:<11.2f} {pct:>8.2f}% {direction_symbol} {direction:<6} {conf:>10.1f}%")
-        
-        print("=" * 100)
-        
-        # Summary statistics
-        avg_confidence = np.mean([p['confidence'] for p in predictions])
-        up_count = len([p for p in predictions if p['direction'] == 'UP'])
-        down_count = len([p for p in predictions if p['direction'] == 'DOWN'])
-        
-        print(f"\nSummary:")
-        print(f"  Total symbols: {len(predictions)}")
-        print(f"  Predicted UP: {up_count}")
-        print(f"  Predicted DOWN: {down_count}")
-        print(f"  Average confidence: {avg_confidence:.1f}%")
-        print("=" * 100 + "\n")
+    result["trainedAt"] = datetime.now(timezone.utc).isoformat()
+    result["finalValLoss"] = history.get("val_loss", [None])[-1]
+    result["rows"] = int(len(clean))
+    result["model"] = net
+    return result
 
 
-if __name__ == "__main__":
-    predictor = StockPredictor()
-    predictions = predictor.predict_all_symbols()
-    predictor.print_predictions(predictions)
+def predict_next_day(symbol: str, use_cache: bool = False) -> dict:
+    """
+    Forecast the next session's close.
+
+    The confidence interval comes from the model's own out-of-sample
+    residual spread recorded during backtesting, not an assumed
+    distribution. If no backtest is on file the interval is omitted rather
+    than guessed.
+    """
+    symbol = symbol.upper()
+    net = M.load_model(symbol)
+    bundle = load_scalers(symbol)
+
+    if net is None or bundle is None:
+        return {
+            "symbol": symbol,
+            "isModelBacked": False,
+            "unavailableReason": f"No trained model on disk for {symbol}.",
+        }
+
+    feature_cols = bundle["features"]
+    df, _ = prepare(symbol, use_cache=use_cache)
+    clean = df.dropna(subset=feature_cols + [config.TARGET_COLUMN]).reset_index(drop=True)
+
+    time_step = bundle.get("timeStep", config.TIME_STEP)
+    if len(clean) < time_step:
+        return {
+            "symbol": symbol,
+            "isModelBacked": False,
+            "unavailableReason": f"Only {len(clean)} usable rows; need {time_step}.",
+        }
+
+    # The most recent `time_step` rows, scaled with the SAVED scaler.
+    window = bundle["x"].transform(clean[feature_cols].to_numpy(dtype=float)[-time_step:])
+    scaled_pred = net.predict(window[np.newaxis, ...], verbose=0).ravel()
+    target_pred = float(bundle["y"].inverse_transform(scaled_pred.reshape(-1, 1)).ravel()[0])
+
+    base_price = float(clean[config.TARGET_COLUMN].iloc[-1])
+    base_date = str(clean["date"].iloc[-1])[:10]
+    predicted = float(
+        B.reconstruct_price(np.array([base_price]), np.array([target_pred]),
+                            bundle.get("targetMode", config.TARGET_MODE))[0]
+    )
+
+    change = predicted - base_price
+    change_pct = (change / base_price * 100.0) if base_price else None
+
+    return {
+        "symbol": symbol,
+        "isModelBacked": True,
+        "basePrice": base_price,
+        "baseDate": base_date,
+        "predictedClose": predicted,
+        "predictedChange": change,
+        "predictedChangePercent": change_pct,
+        "direction": "UP" if change > 0 else "DOWN" if change < 0 else "FLAT",
+        "horizonDays": config.HORIZON_DAYS,
+        "modelVersion": config.MODEL_VERSION,
+        "modelArchitecture": f"LSTM-{config.LSTM_UNITS}-single-layer",
+        "featureSet": feature_cols,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+__all__ = ["train_symbol", "predict_next_day", "prepare", "save_scalers", "load_scalers"]

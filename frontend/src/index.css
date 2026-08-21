@@ -2,52 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Reset ─────────────────────────────────────────── */
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-body {
-  background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
-  color: #ffffff;
-  font-family: 'Inter', sans-serif;
+/* ─── Root font ──────────────────────────────────────── */
+html {
+  scroll-behavior: smooth;
 }
 
+body {
+  background: #000000;
+  color: #ffffff;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1a1f3a;
+  background: #0a0a0a;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #00d084;
+  background: #333;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #00f5a0;
+  background: #64CEFB;
 }
 
+/* ─── Glass effect ───────────────────────────────────── */
 .glass-effect {
-  background: rgba(26, 31, 58, 0.5);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0, 208, 132, 0.2);
+  background: rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* ─── Card hover ─────────────────────────────────────── */
 .card-hover {
   transition: all 0.3s ease;
-  border: 1px solid rgba(0, 208, 132, 0.3);
+  border: 1px solid rgba(100, 206, 251, 0.15);
 }
 
 .card-hover:hover {
-  border-color: rgba(0, 208, 132, 0.8);
-  box-shadow: 0 0 20px rgba(0, 208, 132, 0.2);
+  border-color: rgba(100, 206, 251, 0.5);
+  box-shadow: 0 0 24px rgba(100, 206, 251, 0.12);
   transform: translateY(-4px);
 }
 
+/* ─── Price colours ──────────────────────────────────── */
 .text-up {
   color: #00d084;
 }
@@ -56,9 +69,91 @@ body {
   color: #ff4757;
 }
 
+/* ─── Gradient text utility ──────────────────────────── */
 .gradient-text {
-  background: linear-gradient(135deg, #00d084 0%, #00f5a0 100%);
+  background: linear-gradient(135deg, #64CEFB 0%, #ffffff 50%, #64CEFB 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* ─── Shiny text keyframe (CSS fallback) ─────────────── */
+@keyframes shiny-sweep {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
+.shiny-text {
+  background: linear-gradient(
+    100deg,
+    #64CEFB 0%,
+    #64CEFB 40%,
+    #ffffff 50%,
+    #64CEFB 60%,
+    #64CEFB 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: shiny-sweep 3s linear infinite;
+}
+
+/* ─── Market ticker ──────────────────────────────────── */
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.ticker-wrap {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ticker-track {
+  display: inline-flex;
+  animation: ticker-scroll 30s linear infinite;
+}
+
+/* ─── Fade-in-up animation ───────────────────────────── */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.8s ease both;
+}
+
+.delay-100 { animation-delay: 0.1s; }
+.delay-200 { animation-delay: 0.2s; }
+.delay-300 { animation-delay: 0.3s; }
+.delay-400 { animation-delay: 0.4s; }
+.delay-500 { animation-delay: 0.5s; }
+
+/* ─── Hero heading line-height override ─────────────── */
+.hero-heading {
+  line-height: 0.85;
+  letter-spacing: -0.04em;
+}
+
+/* ─── Pill nav container ─────────────────────────────── */
+.pill-nav {
+  border: 1px solid rgba(55, 65, 81, 0.8); /* gray-700 */
+  border-radius: 9999px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* ─── Inner page dark background ────────────────────── */
+.page-bg {
+  background: linear-gradient(135deg, #06080f 0%, #0d1017 50%, #06080f 100%);
+  min-height: 100vh;
 }
