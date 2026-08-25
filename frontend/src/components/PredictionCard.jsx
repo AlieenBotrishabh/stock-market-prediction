@@ -144,9 +144,15 @@ const PredictionCard = ({ symbol, showBacktest = true }) => {
   if (state.error) return <ErrorState error={state.error} onRetry={() => load()} />;
 
   const p = state.data;
-  if (!p?.isModelBacked) {
+
+  // Three states, not two. A `provisional` response carries a real number
+  // that has not cleared validation — showing the "no forecast" card for it
+  // would contradict the grid, which displays that number. Only a response
+  // with no number at all gets Unavailable.
+  if (!p?.isModelBacked && !p?.provisional) {
     return <Unavailable symbol={symbol} reason={p?.unavailableReason ?? 'No trained model.'} />;
   }
+  const provisional = Boolean(p.provisional);
 
   const up = (p.predictedChangePercent ?? 0) >= 0;
   const bt = p.backtest;
@@ -155,20 +161,43 @@ const PredictionCard = ({ symbol, showBacktest = true }) => {
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      className="glass-effect rounded-2xl border border-white/10 p-6"
+      className={`rounded-2xl p-6 ${
+        provisional
+          ? 'bg-white/[0.015] border border-dashed border-accent-amber/30'
+          : 'glass-effect border border-white/10'
+      }`}
     >
+      {provisional && p.qualityWarning && (
+        <div className="flex items-start gap-2.5 text-[12px] text-accent-amber bg-accent-amber/[0.07] border border-accent-amber/20 rounded-xl px-3.5 py-3 mb-5">
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          <span className="leading-relaxed">{p.qualityWarning}</span>
+        </div>
+      )}
+
       <div className="flex items-start justify-between mb-5 flex-wrap gap-3">
         <h3 className="text-base font-bold text-white flex items-center gap-2">
           <Brain size={16} className="text-accent-blue" />
           Next-Day Forecast
         </h3>
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="inline-flex items-center gap-1.5 text-[11px] text-accent-green bg-accent-green/10 border border-accent-green/25 px-2 py-0.5 rounded-full">
+          <span
+            className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full border ${
+              provisional
+                ? 'text-accent-amber bg-accent-amber/10 border-accent-amber/25'
+                : 'text-accent-green bg-accent-green/10 border-accent-green/25'
+            }`}
+          >
             <span className="relative flex w-1.5 h-1.5">
-              <span className="absolute inline-flex w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse-ring motion-reduce:animate-none" />
-              <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-accent-green" />
+              {!provisional && (
+                <span className="absolute inline-flex w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse-ring motion-reduce:animate-none" />
+              )}
+              <span
+                className={`relative inline-flex w-1.5 h-1.5 rounded-full ${
+                  provisional ? 'bg-accent-amber' : 'bg-accent-green'
+                }`}
+              />
             </span>
-            Live inference
+            {provisional ? 'Unvalidated' : 'Live inference'}
           </span>
           {p.model?.source?.startsWith('huggingface') && (
             <span className="text-[11px] text-white/30" title={p.model.source}>

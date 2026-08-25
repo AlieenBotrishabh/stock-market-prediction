@@ -369,16 +369,30 @@ export async function predict(symbol) {
     );
   }
 
-  // A model that failed walk-forward validation must not emit a number.
-  if (metrics.beatsBaseline === false) {
-    return unavailable(
-      key,
-      `The model for ${key} did not pass validation (walk-forward error ` +
-      `${metrics.model?.mape?.toFixed(2)}% vs a ${metrics.baseline?.mape?.toFixed(2)}% ` +
-      `naive baseline, direction accuracy ${metrics.model?.directionAccuracy?.toFixed(1)}%), ` +
-      'so its output is withheld.',
-    );
-  }
+  // A model that failed walk-forward validation is PROVISIONAL: the number
+  // is still computed and returned, but flagged so the caller can present
+  // it differently. `isModelBacked` continues to mean "cleared the gate",
+  // so any consumer relying on that invariant is unaffected.
+  //
+  // This is a deliberate product decision, not a lowering of the bar. The
+  // figure is genuine model output; what it lacks is demonstrated skill.
+  // Below 50% direction accuracy the model has been WORSE than a coin flip
+  // out of sample, which is why `qualityWarning` and the raw metrics travel
+  // with it and the UI must not render it like a validated forecast.
+  const provisional = metrics.beatsBaseline === false;
+  const gate = metrics.gate ?? {};
+  const dirAcc = metrics.model?.directionAccuracy;
+  const qualityWarning = !provisional ? null : (
+    dirAcc != null && dirAcc < 50
+      ? `Out of sample this model called ${key}'s direction correctly `
+        + `${dirAcc.toFixed(1)}% of the time — worse than a coin flip. `
+        + 'Treat this figure as unvalidated.'
+      : `This model did not clear validation for ${key} `
+        + `(${!gate.directionOk ? `direction accuracy ${dirAcc?.toFixed(1)}%, below the 51% bar`
+             : `error ${metrics.model?.mape?.toFixed(2)}% against a `
+               + `${metrics.baseline?.mape?.toFixed(2)}% naive baseline`}). `
+        + 'Treat this figure as unvalidated.'
+  );
 
   const timeStep = config.timeStep;
 
@@ -493,7 +507,12 @@ export async function predict(symbol) {
 
   return {
     symbol: key,
-    isModelBacked: true,
+    // Only true when the model cleared its walk-forward gate.
+    isModelBacked: !provisional,
+    // True when the number is real model output that has NOT demonstrated
+    // skill. `predictedClose` is populated either way.
+    provisional,
+    qualityWarning,
     basePrice,
     baseDate,
     predictedClose,

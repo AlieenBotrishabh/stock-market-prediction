@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Brain, BookOpen, ShieldCheck, TrendingUp, TrendingDown, RefreshCw,
-  Info, ArrowUpRight, Zap, EyeOff,
+  Info, ArrowUpRight, Zap, EyeOff, AlertTriangle,
 } from 'lucide-react';
 import PageLayout from '../components/PageLayout';
 import PredictionCard from '../components/PredictionCard';
@@ -30,9 +30,18 @@ import { formatPrice, formatPercent, formatRelativeTime } from '../utils/formatt
 
 const REFRESH_MS = 60_000;
 
-/** One company in the live grid. */
+/**
+ * One company in the live grid.
+ *
+ * `provisional` companies show a real model number that has not cleared
+ * validation, so they are rendered muted, without the direction wash, and
+ * with their accuracy called out. The visual difference is the point: the
+ * figure is shown, but never dressed up as a validated forecast.
+ */
 const ForecastTile = ({ p, active, onSelect }) => {
   const up = (p.predictedChangePercent ?? 0) >= 0;
+  const weak = Boolean(p.provisional);
+  const belowChance = (p.directionAccuracy ?? 0) < 50;
   return (
     <motion.button
       layout
@@ -44,24 +53,30 @@ const ForecastTile = ({ p, active, onSelect }) => {
       className={`relative overflow-hidden text-left rounded-2xl p-4 border transition-colors ${
         active
           ? 'bg-white/[0.07] border-accent-blue/60'
-          : 'glass-effect border-white/10 hover:border-accent-blue/35'
+          : weak
+            ? 'bg-white/[0.015] border-dashed border-white/12 hover:border-white/25'
+            : 'glass-effect border-white/10 hover:border-accent-blue/35'
       }`}
     >
-      {/* Direction wash */}
-      <div
-        className="absolute inset-0 opacity-[0.07] pointer-events-none"
-        style={{
-          background: `radial-gradient(120% 100% at 50% 100%, ${
-            up ? '#00d084' : '#ff4757'
-          } 0%, transparent 70%)`,
-        }}
-      />
+      {/* Direction wash — validated forecasts only. */}
+      {!weak && (
+        <div
+          className="absolute inset-0 opacity-[0.07] pointer-events-none"
+          style={{
+            background: `radial-gradient(120% 100% at 50% 100%, ${
+              up ? '#00d084' : '#ff4757'
+            } 0%, transparent 70%)`,
+          }}
+        />
+      )}
       <div className="relative">
         <div className="flex items-start justify-between gap-2 mb-2">
           <span className="text-sm font-bold text-white truncate">{p.symbol}</span>
           <span
             className={`shrink-0 flex items-center gap-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full ${
-              up ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'
+              weak
+                ? 'bg-white/8 text-white/45'
+                : up ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'
             }`}
           >
             {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
@@ -72,7 +87,7 @@ const ForecastTile = ({ p, active, onSelect }) => {
         <AnimatedNumber
           value={p.predictedClose}
           format={(v) => formatPrice(v)}
-          className="text-xl font-bold text-white block"
+          className={`text-xl font-bold block ${weak ? 'text-white/55' : 'text-white'}`}
         />
         <p className="text-[11px] text-white/30 mt-0.5">from {formatPrice(p.basePrice)}</p>
 
@@ -80,10 +95,13 @@ const ForecastTile = ({ p, active, onSelect }) => {
           <span className="text-white/30">direction</span>
           <span
             className={
-              (p.directionAccuracy ?? 0) >= 52
-                ? 'text-accent-green font-semibold'
-                : 'text-white/60 font-semibold'
+              belowChance
+                ? 'text-accent-red/70 font-semibold'
+                : (p.directionAccuracy ?? 0) >= 52
+                  ? 'text-accent-green font-semibold'
+                  : 'text-white/60 font-semibold'
             }
+            title={belowChance ? 'Worse than a coin flip out of sample' : undefined}
           >
             {p.directionAccuracy?.toFixed(1)}%
           </span>
@@ -142,7 +160,8 @@ const Predictions = () => {
   }, [load]);
 
   const served = state.data?.served ?? [];
-  const withheld = state.data?.withheld ?? [];
+  const provisional = state.data?.provisional ?? [];
+  const unavailable = state.data?.unavailable ?? [];
   const total = state.data?.total ?? 0;
 
   const HeaderRight = (
@@ -181,8 +200,8 @@ const Predictions = () => {
         >
           {[
             { label: 'Companies evaluated', value: total, color: 'text-accent-blue', Icon: Brain },
-            { label: 'Serving a forecast', value: served.length, color: 'text-accent-green', Icon: ShieldCheck },
-            { label: 'Withheld', value: withheld.length, color: 'text-white/50', Icon: EyeOff },
+            { label: 'Validated', value: served.length, color: 'text-accent-green', Icon: ShieldCheck },
+            { label: 'Unvalidated', value: provisional.length, color: 'text-accent-amber', Icon: AlertTriangle },
           ].map(({ label, value, color, Icon }) => (
             <div key={label} className="glass-effect rounded-2xl border border-white/10 p-4">
               <div className="flex items-center gap-1.5 mb-1.5">
@@ -208,7 +227,7 @@ const Predictions = () => {
             <div className="mb-8">
               <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
                 <h3 className="text-sm font-semibold text-white/50 uppercase tracking-wider flex items-center gap-2">
-                  <Zap size={13} className="text-accent-green" /> Live forecasts
+                  <Zap size={13} className="text-accent-green" /> Validated forecasts
                 </h3>
                 <p className="text-[11px] text-white/30">
                   largest expected move first · tap to inspect
@@ -259,8 +278,45 @@ const Predictions = () => {
             </div>
           )}
 
-          {/* Withheld — surfaced, not hidden */}
-          {withheld.length > 0 && (
+          {/* Unvalidated tier — shown with the numbers, clearly separated */}
+          {provisional.length > 0 && (
+            <div className="mb-8">
+              <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
+                <h3 className="text-sm font-semibold text-white/50 uppercase tracking-wider flex items-center gap-2">
+                  <AlertTriangle size={13} className="text-accent-amber" /> Unvalidated
+                </h3>
+                <p className="text-[11px] text-white/30">
+                  real model output · has not beaten a coin flip out of sample
+                </p>
+              </div>
+
+              <div className="flex items-start gap-2.5 text-[11px] text-accent-amber bg-accent-amber/[0.07] border border-accent-amber/20 rounded-xl px-3.5 py-2.5 mb-3">
+                <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                <span className="leading-relaxed">
+                  These come from the same model, but on held-out sessions it
+                  called their direction correctly{' '}
+                  {Math.min(...provisional.map((p) => p.directionAccuracy ?? 100)).toFixed(1)}–
+                  {Math.max(...provisional.map((p) => p.directionAccuracy ?? 0)).toFixed(1)}% of
+                  the time. Anything at or below 50% is no better than guessing,
+                  so treat these as illustrative rather than forecasts.
+                </span>
+              </div>
+
+              <motion.div layout className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                {provisional.map((p) => (
+                  <ForecastTile
+                    key={p.symbol}
+                    p={p}
+                    active={p.symbol === symbol}
+                    onSelect={setSymbol}
+                  />
+                ))}
+              </motion.div>
+            </div>
+          )}
+
+          {/* Companies with no usable output at all */}
+          {unavailable.length > 0 && (
             <div className="mb-8">
               <button
                 onClick={() => setShowWithheld((v) => !v)}
@@ -270,8 +326,8 @@ const Predictions = () => {
                 <span className="flex items-center gap-2.5 text-left">
                   <EyeOff size={15} className="text-white/40 shrink-0" />
                   <span className="text-sm text-white/70">
-                    <strong className="text-white">{withheld.length}</strong> companies
-                    were evaluated but did not qualify
+                    <strong className="text-white">{unavailable.length}</strong> companies
+                    produced no usable output
                   </span>
                 </span>
                 <span className="text-xs text-accent-blue shrink-0">
@@ -289,7 +345,7 @@ const Predictions = () => {
                     className="overflow-hidden"
                   >
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
-                      {withheld.map((w) => (
+                      {unavailable.map((w) => (
                         <div key={w.symbol} className="glass-effect rounded-xl border border-white/5 p-3.5">
                           <p className="text-sm font-bold text-white/70 mb-1">{w.symbol}</p>
                           <p className="text-[11px] text-white/35 leading-relaxed">{w.reason}</p>

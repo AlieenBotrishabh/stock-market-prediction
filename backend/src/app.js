@@ -192,36 +192,54 @@ export function createApp() {
 
     const settled = await Promise.allSettled(symbols.map((s) => predictor.predict(s)));
     const served = [];
-    const withheld = [];
+    const provisional = [];
+    const unavailable = [];
+
+    const shape = (p) => ({
+      symbol: p.symbol,
+      basePrice: p.basePrice,
+      predictedClose: p.predictedClose,
+      predictedChange: p.predictedChange,
+      predictedChangePercent: p.predictedChangePercent,
+      direction: p.direction,
+      confidenceLow: p.confidenceLow,
+      confidenceHigh: p.confidenceHigh,
+      directionAccuracy: p.backtest?.directionAccuracy ?? null,
+      mape: p.backtest?.mape ?? null,
+      baselineMape: p.backtest?.baselineMape ?? null,
+      provisional: Boolean(p.provisional),
+      qualityWarning: p.qualityWarning ?? null,
+      generatedAt: p.generatedAt,
+    });
 
     for (const r of settled) {
       if (r.status !== 'fulfilled') continue;
       const p = r.value;
-      if (p.isModelBacked) {
-        served.push({
-          symbol: p.symbol,
-          basePrice: p.basePrice,
-          predictedClose: p.predictedClose,
-          predictedChange: p.predictedChange,
-          predictedChangePercent: p.predictedChangePercent,
-          direction: p.direction,
-          confidenceLow: p.confidenceLow,
-          confidenceHigh: p.confidenceHigh,
-          directionAccuracy: p.backtest?.directionAccuracy ?? null,
-          mape: p.backtest?.mape ?? null,
-          baselineMape: p.backtest?.baselineMape ?? null,
-          generatedAt: p.generatedAt,
-        });
-      } else {
-        withheld.push({ symbol: p.symbol, reason: p.unavailableReason });
-      }
+      if (p.isModelBacked) served.push(shape(p));
+      // A provisional entry has a real number that has not demonstrated
+      // skill. It is kept separate from `served` so a client cannot mix the
+      // two by accident.
+      else if (p.provisional && p.predictedClose != null) provisional.push(shape(p));
+      else unavailable.push({ symbol: p.symbol, reason: p.unavailableReason });
     }
 
-    served.sort((a, b) =>
-      Math.abs(b.predictedChangePercent ?? 0) - Math.abs(a.predictedChangePercent ?? 0));
+    const byMove = (a, b) =>
+      Math.abs(b.predictedChangePercent ?? 0) - Math.abs(a.predictedChangePercent ?? 0);
+    served.sort(byMove);
+    // Weakest evidence last, so the list degrades in a readable order.
+    provisional.sort((a, b) => (b.directionAccuracy ?? 0) - (a.directionAccuracy ?? 0));
 
     setCacheHeaders(res, 'quote', providers.getMarketHints());
-    ok(res, { served, withheld, total: symbols.length });
+    ok(res, {
+      served,
+      provisional,
+      unavailable,
+      // Retained for older clients that expect a `withheld` list.
+      withheld: [...provisional.map((p) => ({
+        symbol: p.symbol, reason: p.qualityWarning,
+      })), ...unavailable],
+      total: symbols.length,
+    });
   }));
 
   // ─── Market movers ─────────────────────────────────────────────────────
