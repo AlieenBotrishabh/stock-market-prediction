@@ -1,18 +1,27 @@
-name: Daily predictions
+name: Retrain models (manual)
 
-# Runs after the NSE close. 10:30 UTC = 16:00 IST, half an hour after the
-# 15:30 IST close, so the day's final bar is available from Yahoo.
+# NOTHING ON THE SITE DEPENDS ON THIS WORKFLOW.
+#
+# Forecasts are produced by ONNX inference inside the API at request time,
+# using bundles committed under ml-pipeline/export/. They are served on a
+# fresh deploy with no job having run, so a failure here can never take
+# predictions off the site.
+#
+# It used to run on a schedule and fail most days, and because predictions
+# were read from its output back then, a failed run meant no forecasts at
+# all. Removing the schedule removes that whole class of outage: retraining
+# is now an explicit choice, made when you want new weights, and its output
+# is reviewed before being committed.
+#
+# Run it from the Actions tab when you want to refresh the models.
 on:
-  schedule:
-    - cron: '30 10 * * 1-5'   # weekdays, inference only
-    - cron: '30 12 * * 6'     # Saturday, full retrain
   workflow_dispatch:
     inputs:
       mode:
         description: 'What to run'
         type: choice
-        options: [predict, full]
-        default: predict
+        options: [publish, train-only]
+        default: publish
       symbols:
         description: 'Space-separated symbols (blank = all configured)'
         default: ''
@@ -55,18 +64,11 @@ jobs:
 
       - name: Decide mode
         id: mode
-        run: |
-          if [ "${{ github.event.schedule }}" = "30 12 * * 6" ]; then
-            echo "mode=full" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=${{ github.event.inputs.mode || 'predict' }}" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "mode=${{ github.event.inputs.mode || 'publish' }}" >> "$GITHUB_OUTPUT"
 
-      - name: Run pipeline
+      - name: Train and validate
         working-directory: ml-pipeline
         env:
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
-          MONGODB_DB: ${{ secrets.MONGODB_DB || 'stockmarket' }}
           MODEL_VERSION: lstm-150-single-v1
           LOG_LEVEL: INFO
           # Runners are CPU-only. A single-layer LSTM(150) over ~2,500 rows
@@ -78,23 +80,34 @@ jobs:
           if [ -n "${{ github.event.inputs.symbols }}" ]; then
             SYMBOLS_ARG="--symbols ${{ github.event.inputs.symbols }}"
           fi
-          if [ "${{ steps.mode.outputs.mode }}" = "full" ]; then
-            python main.py --full $SYMBOLS_ARG
-          else
-            python main.py --predict --publish $SYMBOLS_ARG
-          fi
+          python main.py --train $SYMBOLS_ARG
+
+      - name: Export ONNX bundles
+        working-directory: ml-pipeline
+        run: python export_onnx.py --all
+
+      # Only runs when HF_TOKEN is configured; without it the workflow
+      # still trains and uploads the bundles as build artifacts.
+      - name: Publish to Hugging Face
+        if: ${{ steps.mode.outputs.mode != 'train-only' && env.HF_TOKEN != '' }}
+        working-directory: ml-pipeline
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_MODEL_REPO: ${{ vars.HF_MODEL_REPO || 'Ace6868/stock-price-prediction-lstm' }}
+        run: python push_to_hf.py --all
 
       - name: Summary
         if: always()
         working-directory: ml-pipeline
         run: python main.py --status >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
 
-      - name: Upload logs
+      - name: Upload logs and bundles
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-logs
+          name: pipeline-output
           path: |
             ml-pipeline/logs/
             ml-pipeline/reports/
+            ml-pipeline/export/
           retention-days: 14

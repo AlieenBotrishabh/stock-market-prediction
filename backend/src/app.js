@@ -9,9 +9,10 @@
  * Design rules enforced here:
  *  - No handler ever invents data. Upstream failure yields a 4xx/5xx with
  *    an explanatory message, or cached data explicitly flagged isStale.
- *  - Predictions are served from MongoDB only, written by the offline
- *    Python pipeline. If none exists, the response says so via
- *    isModelBacked:false rather than returning a plausible number.
+ *  - Predictions run LIVE: /predict executes an exported ONNX graph at
+ *    request time. If no validated model exists for a symbol, the response
+ *    says so via isModelBacked:false rather than returning a plausible
+ *    number.
  */
 
 import express from 'express';
@@ -20,8 +21,9 @@ import { connectDb, isConnected, isConfigured } from './db.js';
 import providers from './providers/index.js';
 import { indian } from './providers/index.js';
 import indicators from './services/indicators.js';
+import predictor from './services/predictor.js';
 import { setCacheHeaders } from './services/cache.js';
-import { Prediction, Backtest, Watchlist } from './models/index.js';
+import { Watchlist } from './models/index.js';
 
 /** Wrap an async handler so rejections reach the error middleware. */
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -150,102 +152,76 @@ export function createApp() {
     });
   }));
 
-  // ─── Predictions (read-only; written by the offline pipeline) ──────────
+  // ─── Predictions (live ONNX inference at request time) ─────────────────
   api.get('/predict/:symbol', ah(async (req, res) => {
     const symbol = cleanSymbol(req.params.symbol);
 
-    const unavailable = (reason) =>
-      ok(res, {
-        symbol,
-        isModelBacked: false,
-        unavailableReason: reason,
-        predictedClose: null,
-        confidenceLow: null,
-        confidenceHigh: null,
-      });
+    // Inference runs here and now: the exported ONNX graph is executed
+    // against the latest available bars. There is no nightly batch to go
+    // stale, so `generatedAt` is always the moment of the request.
+    const prediction = await predictor.predict(symbol);
 
-    if (!isConnected()) {
-      return unavailable(
-        'Prediction store unavailable. Predictions are produced by the offline ML pipeline and read from MongoDB.',
-      );
+    if (prediction.isModelBacked) {
+      // Show the live price alongside the forecast so a forecast made from
+      // yesterday's close is obvious while today's session is running.
+      try {
+        prediction.currentPrice = (await providers.getQuote(symbol)).price;
+      } catch { /* the forecast still stands without it */ }
     }
 
-    const prediction = await Prediction.findOne({ symbol }).sort({ generatedAt: -1 }).lean();
-    if (!prediction) {
-      return unavailable(`No model has been trained for ${symbol} yet.`);
-    }
-    if (!prediction.isModelBacked) {
-      return unavailable(
-        prediction.unavailableReason ??
-          `The model for ${symbol} did not beat the naive baseline, so its output is withheld.`,
-      );
-    }
-
-    const backtest = await Backtest.findOne({
-      symbol,
-      modelVersion: prediction.modelVersion,
-    }).lean();
-
-    // Report against the CURRENT price so a stale forecast is obvious.
-    let currentPrice = null;
-    try {
-      currentPrice = (await providers.getQuote(symbol)).price;
-    } catch { /* prediction is still meaningful without it */ }
-
-    const ageHours = (Date.now() - new Date(prediction.generatedAt).getTime()) / 3_600_000;
-
-    ok(res, {
-      symbol,
-      isModelBacked: true,
-      currentPrice,
-      basePrice: prediction.basePrice,
-      predictedClose: prediction.predictedClose,
-      predictedChange: prediction.predictedChange,
-      predictedChangePercent: prediction.predictedChangePercent,
-      direction: prediction.direction,
-      confidenceLow: prediction.confidenceLow,
-      confidenceHigh: prediction.confidenceHigh,
-      confidenceLevel: prediction.confidenceLevel,
-      horizonDays: prediction.horizonDays,
-      model: {
-        version: prediction.modelVersion,
-        architecture: prediction.modelArchitecture,
-        trainedAt: prediction.trainedAt,
-        features: prediction.featureSet ?? [],
-      },
-      backtest: backtest
-        ? {
-            mape: backtest.mape,
-            rmse: backtest.rmse,
-            r: backtest.r,
-            directionAccuracy: backtest.directionAccuracy,
-            baselineMape: backtest.baselineMape,
-            baselineName: backtest.baselineName,
-            beatsBaseline: backtest.beatsBaseline,
-            walkForwardWindows: backtest.walkForwardWindows,
-            sample: backtest.sample ?? [],
-          }
-        : null,
-      generatedAt: prediction.generatedAt,
-      // A forecast for "tomorrow" made three days ago is not for tomorrow.
-      isStale: ageHours > 36,
-      ageHours: Math.round(ageHours * 10) / 10,
-    });
+    // Deliberately NOT the shared stale-while-revalidate policy used for
+    // quotes. Inference is 4 ms and the history behind it is already cached
+    // server-side, so there is nothing to gain — while a long SWR window
+    // actively harms correctness: after a model is retrained and starts
+    // passing its gate, clients kept serving the cached "no forecast
+    // available" text for up to a day. Short and revalidating.
+    res.set('Cache-Control', 'public, max-age=30, s-maxage=60, must-revalidate');
+    ok(res, prediction);
   }));
 
-  /** Every symbol that currently has a usable model. */
+  /**
+   * Live forecast for every company that has a bundle.
+   *
+   * Returns withheld companies too, with their reason — the page needs to
+   * show that a company was evaluated and did not qualify, which is
+   * different from it not existing.
+   */
   api.get('/predictions', ah(async (_req, res) => {
-    if (!isConnected()) return ok(res, []);
-    const rows = await Prediction.find({ isModelBacked: true })
-      .sort({ generatedAt: -1 }).limit(60).lean();
-    ok(res, rows.map((p) => ({
-      symbol: p.symbol,
-      predictedClose: p.predictedClose,
-      predictedChangePercent: p.predictedChangePercent,
-      direction: p.direction,
-      generatedAt: p.generatedAt,
-      modelVersion: p.modelVersion,
-    })));
+    const symbols = await predictor.listLocalModels();
+    if (!symbols.length) return ok(res, { served: [], withheld: [], total: 0 });
+
+    const settled = await Promise.allSettled(symbols.map((s) => predictor.predict(s)));
+    const served = [];
+    const withheld = [];
+
+    for (const r of settled) {
+      if (r.status !== 'fulfilled') continue;
+      const p = r.value;
+      if (p.isModelBacked) {
+        served.push({
+          symbol: p.symbol,
+          basePrice: p.basePrice,
+          predictedClose: p.predictedClose,
+          predictedChange: p.predictedChange,
+          predictedChangePercent: p.predictedChangePercent,
+          direction: p.direction,
+          confidenceLow: p.confidenceLow,
+          confidenceHigh: p.confidenceHigh,
+          directionAccuracy: p.backtest?.directionAccuracy ?? null,
+          mape: p.backtest?.mape ?? null,
+          baselineMape: p.backtest?.baselineMape ?? null,
+          generatedAt: p.generatedAt,
+        });
+      } else {
+        withheld.push({ symbol: p.symbol, reason: p.unavailableReason });
+      }
+    }
+
+    served.sort((a, b) =>
+      Math.abs(b.predictedChangePercent ?? 0) - Math.abs(a.predictedChangePercent ?? 0));
+
+    setCacheHeaders(res, 'quote', providers.getMarketHints());
+    ok(res, { served, withheld, total: symbols.length });
   }));
 
   // ─── Market movers ─────────────────────────────────────────────────────

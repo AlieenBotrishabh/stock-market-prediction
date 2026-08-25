@@ -64,6 +64,9 @@ def train_symbol(
     run_backtest: bool = True,
     base_model=None,
     use_cache: bool = True,
+    n_windows: int = config.WALK_FORWARD_WINDOWS,
+    replicates: int = config.N_REPLICATES,
+    batch_size: int = config.BATCH_SIZE,
 ) -> dict:
     """
     Train, validate and persist a model for one symbol.
@@ -78,7 +81,13 @@ def train_symbol(
     result = {"symbol": symbol.upper(), "featureSet": feature_cols}
 
     if run_backtest:
-        bt = B.walk_forward(df, feature_cols, epochs=epochs, verbose=True)
+        # These must be forwarded, not left to the config defaults: a
+        # caller asking for a cheaper validation sweep was previously
+        # ignored, silently running 5 windows x 3 replicates per symbol.
+        bt = B.walk_forward(
+            df, feature_cols, epochs=epochs, verbose=True,
+            n_windows=n_windows, replicates=replicates, batch_size=batch_size,
+        )
         result["backtest"] = bt
         log.info(
             "%s backtest: MAPE %.3f%% (naive %.3f%%) dir %.1f%% -> publish=%s",
@@ -106,7 +115,7 @@ def train_symbol(
     M.set_seeds()
     net, history = M.train_model(
         x_all[:val_cut], y_all[:val_cut], x_all[val_cut:], y_all[val_cut:],
-        epochs=epochs, base_model=base_model,
+        epochs=epochs, batch_size=batch_size, base_model=base_model,
     )
 
     M.save_model(net, symbol)
@@ -177,7 +186,7 @@ def predict_next_day(symbol: str, use_cache: bool = False) -> dict:
         "direction": "UP" if change > 0 else "DOWN" if change < 0 else "FLAT",
         "horizonDays": config.HORIZON_DAYS,
         "modelVersion": config.MODEL_VERSION,
-        "modelArchitecture": f"LSTM-{config.LSTM_UNITS}-single-layer",
+        "modelArchitecture": f"LSTM-{config.LSTM_UNITS}x{config.LSTM_LAYERS}-ts{config.TIME_STEP}",
         "featureSet": feature_cols,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }

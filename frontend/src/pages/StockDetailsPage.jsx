@@ -65,6 +65,10 @@ const StockDetailsPage = () => {
   const [watchlisted, setWatchlisted] = useState(false);
 
   const [news, setNews] = useState([]);
+  // Distinguishes "the source failed" from "there genuinely is no news".
+  // Rendering an empty-state for a failed request asserts something false
+  // about the company.
+  const [newsError, setNewsError] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const [dividends, setDividends] = useState([]);
 
@@ -112,7 +116,13 @@ const StockDetailsPage = () => {
       )
       .catch(() => {});
 
-    getNews(upper, opts).then((n) => setNews(n.slice(0, 6))).catch(() => setNews([]));
+    getNews(upper, opts)
+      .then((n) => { setNews(n.slice(0, 6)); setNewsError(null); })
+      .catch((err) => {
+        if (err.name === 'AbortError') return;
+        setNews([]);
+        setNewsError(err);
+      });
     getAnnouncements(upper, opts).then((a) => setAnnouncements(a.slice(0, 5))).catch(() => setAnnouncements([]));
     getCorporateActions(upper, opts)
       .then((ca) => setDividends((ca?.dividends?.rows ?? []).slice(0, 5)))
@@ -359,7 +369,9 @@ const StockDetailsPage = () => {
       {/* News */}
       <div className="mb-5">
         <Section title={`News — ${upper}`} icon={Newspaper}>
-          {news.length === 0 ? (
+          {newsError ? (
+            <ErrorState error={newsError} compact />
+          ) : news.length === 0 ? (
             <EmptyState message="No recent news for this stock." icon={Newspaper} />
           ) : (
             <div className="space-y-4">

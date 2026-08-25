@@ -65,6 +65,12 @@ venv/
 ml-pipeline/data/
 ml-pipeline/models/
 ml-pipeline/scalers/
+# ml-pipeline/export/ is deliberately COMMITTED. The API loads model
+# bundles from it, so shipping them with the code means forecasts work on a
+# fresh deploy with no scheduled job, no Hugging Face fetch and no network
+# dependency at request time. Deduplicated to ~590 KB: one shared graph
+# under _shared/ plus small per-company config and metrics.
+ml-pipeline/reports/
 
 # Debug leftovers (captured API responses)
 temp_*.json

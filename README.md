@@ -3,15 +3,20 @@
 Real-time NSE market data and LSTM-based next-day price forecasts.
 
 React + Vite frontend, a single Express API deployed as one Vercel
-serverless function, MongoDB for caching and model output, and an offline
-Python/TensorFlow pipeline that produces the forecasts.
+serverless function, and a Python/TensorFlow pipeline that trains the
+models.
+
+**Forecasts are produced live.** The trained LSTM is exported to ONNX and
+executed inside the API on each request — 3.7 ms per inference — rather
+than read from a precomputed batch.
 
 ```
 Yahoo Finance ─┐
 IndianAPI ─────┴──> Express API ──> React SPA
                          │
-GitHub Action (16:00 IST) │
-   └─ ml-pipeline ──> MongoDB ──┘
+                    ONNX runtime  ← bundles from Hugging Face
+                         ▲
+   ml-pipeline (weekly GitHub Action): train → validate → export → publish
 ```
 
 ## Quick start
@@ -28,7 +33,9 @@ npm run dev                              # API :5000 + frontend :3000
 | Variable | Required | Notes |
 |---|---|---|
 | `INDIAN_API_KEY` | for news/IPO/funds/fundamentals | **server-side only** — never prefix with `VITE_` |
-| `MONGODB_URI` | for caching + predictions | optional; live quotes work without it |
+| `MONGODB_URI` | no | optional response cache; live quotes work without it |
+| `HF_MODEL_REPO` | no | defaults to `Ace6868/stock-price-prediction-lstm` |
+| `HF_TOKEN` | only for a private model repo | read token |
 | `PORT` | no | defaults to 5000 |
 | `FRONTEND_URL` | production | comma-separated CORS allow-list |
 
@@ -70,9 +77,12 @@ column mapping that failed on any real payload.
 - **Nothing is ever fabricated.** Every mock fallback is deleted. Failures
   render an explicit error state; cached data is labelled with its age.
   Unknown symbols return 404 rather than a plausible-looking empty object.
-- **A real model** — see [`ml-pipeline/README.md`](ml-pipeline/README.md).
-  It publishes a number only after clearing a walk-forward baseline test,
-  and the API reports `isModelBacked: false` with a reason otherwise.
+- **A real model, running live** — see
+  [`ml-pipeline/README.md`](ml-pipeline/README.md). Trained offline,
+  exported to ONNX, and executed in the API on every request. It publishes
+  a number only after clearing a walk-forward gate; otherwise the API
+  returns `isModelBacked: false` with the specific reason, and the UI shows
+  that reason instead of a figure.
 - **One backend.** `server.js` and `vercel-app.js` were two divergent apps
   with copy-pasted handlers and two incompatible Mongoose schemas over the
   same collections. Now one `createApp()` with two thin entry points.
@@ -97,17 +107,19 @@ backend/src/
   app.js              createApp() — the single Express app
   providers/          yahoo.js, indian.js, index.js (failover + cache)
   services/           marketStatus.js, indicators.js, cache.js
-  models/             one canonical Mongoose schema set
+                      features.js   port of the Python feature pipeline
+                      predictor.js  live ONNX inference
 api/index.mjs         Vercel entry (re-exports createApp)
 backend/server.js     local entry
 
 frontend/src/
   services/marketApi.js   the only network layer; throws, never fabricates
-  components/ui/          RangeBar, AnimatedNumber, States (skeleton/error)
+  components/ui/          RangeBar, AnimatedNumber, States, Scroll (reveal/parallax)
   components/             StockChart (candles), IndicatorsPanel, PredictionCard
   pages/
 
-ml-pipeline/          Python: data, features, LSTM, backtest, publish
+ml-pipeline/          Python: data, features, LSTM, backtest,
+                      export_onnx.py, push_to_hf.py
 tests/                cross-language indicator contract test
 ```
 
@@ -121,11 +133,29 @@ curl -s localhost:5000/api/health
 # contradict the model it displays
 python tests/test_indicators.py
 
-# Model validation (~11 min) and the leakage canary
+# Model validation and the leakage canary
 cd ml-pipeline
-python main.py --backtest --symbol RELIANCE
+python main.py --backtest --symbol RELIANCE --replicates 3
 python main.py --leak-check --symbol RELIANCE
+
+# Live inference end to end
+curl localhost:5000/api/predict/RELIANCE
 ```
+
+## Publishing a model
+
+The API loads model bundles from the Hugging Face Hub. After training:
+
+```bash
+cd ml-pipeline
+python export_onnx.py --all     # model.onnx + scaler.json + config.json
+python push_to_hf.py --all      # needs your own HF write token
+```
+
+Each bundle is self-contained — graph, fitted scaler, feature order and
+backtest metrics — so it can be downloaded and run correctly with no other
+context. A bare `.keras` file without its scaler and feature list cannot:
+the inputs are meaningless and so is the output.
 
 After deploying, confirm on the live site that TCS shows its real price and
 that `sk-live` does not appear in the served JS bundle.

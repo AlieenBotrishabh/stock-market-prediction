@@ -149,6 +149,8 @@ def walk_forward(
     n_windows: int = config.WALK_FORWARD_WINDOWS,
     epochs: int = config.EPOCHS,
     target_mode: str = config.TARGET_MODE,
+    replicates: int = config.N_REPLICATES,
+    batch_size: int = config.BATCH_SIZE,
     verbose: bool = False,
 ) -> dict:
     """
@@ -204,14 +206,28 @@ def walk_forward(
             continue
 
         val_cut = int(len(x_train) * (1 - config.VALIDATION_SPLIT))
-        M.set_seeds(config.RANDOM_SEED + k)
-        net, _ = M.train_model(
-            x_train[:val_cut], y_train[:val_cut],
-            x_train[val_cut:], y_train[val_cut:],
-            epochs=epochs, verbose=0,
-        )
 
-        pred_scaled = net.predict(x_test, verbose=0).ravel()
+        # Train several times and average the predictions.
+        #
+        # LSTM training is stochastic, and on a signal this weak a single
+        # fit is genuinely noisy: repeated runs of this same backtest moved
+        # direction accuracy between 50.9% and 52.1%, which straddles the
+        # publication threshold. Bhandari et al. handle this by running
+        # multiple replicates and selecting on the AVERAGE, so a model is
+        # judged on its expected behaviour rather than one lucky seed.
+        # Averaging the ensemble's predictions also cancels some of the
+        # per-fit variance rather than merely measuring it.
+        replicate_preds = []
+        for r in range(replicates):
+            M.set_seeds(config.RANDOM_SEED + k * 100 + r)
+            net, _ = M.train_model(
+                x_train[:val_cut], y_train[:val_cut],
+                x_train[val_cut:], y_train[val_cut:],
+                epochs=epochs, batch_size=batch_size, verbose=0,
+            )
+            replicate_preds.append(net.predict(x_test, verbose=0).ravel())
+
+        pred_scaled = np.mean(replicate_preds, axis=0)
         pred_target = y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
 
         # Index of the close immediately BEFORE each predicted day. Used
@@ -227,7 +243,8 @@ def walk_forward(
         actual = closes[np.clip(idx + 1, 0, n - 1)]
 
         metrics = evaluate(prev, actual, predicted)
-        metrics.update(window=k + 1, trainRows=int(train_end), testRows=int(len(actual)))
+        metrics.update(window=k + 1, trainRows=int(train_end),
+                       testRows=int(len(actual)), replicates=replicates)
         folds.append(metrics)
 
         all_actual.append(actual)
@@ -296,6 +313,7 @@ def walk_forward(
         },
         "folds": folds,
         "walkForwardWindows": len(folds),
+        "replicates": replicates,
         "residualStd": float(np.std(residuals)),
         "confidenceHalfWidth": float(z * np.std(residuals)),
         "sample": [

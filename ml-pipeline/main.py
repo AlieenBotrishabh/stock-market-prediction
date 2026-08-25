@@ -40,6 +40,23 @@ logging.basicConfig(
 log = logging.getLogger("pipeline")
 
 
+def _write_report(symbol: str, result: dict) -> "object":
+    """
+    Persist a walk-forward result to reports/<SYMBOL>_backtest.json.
+
+    export_onnx.py reads this to build the bundle's metrics.json, which is
+    what supplies the publication gate and the confidence interval. Without
+    it a trained model ships unvalidated, so BOTH --train and --backtest
+    must write it -- previously only --backtest did, and a training run
+    silently discarded its own validation.
+    """
+    out = config.REPORT_DIR / f"{symbol.upper()}_backtest.json"
+    payload = {k: v for k, v in result.items() if k != "sample"}
+    payload["sample"] = (result.get("sample") or [])[-120:]
+    out.write_text(json.dumps(payload, indent=1, default=str))
+    return out
+
+
 def cmd_status() -> None:
     models = sorted(config.MODEL_DIR.glob("*.keras"))
     scalers = sorted(config.SCALER_DIR.glob("*.pkl"))
@@ -69,14 +86,16 @@ def cmd_status() -> None:
     print()
 
 
-def cmd_backtest(symbols: list[str], epochs: int) -> None:
+def cmd_backtest(symbols: list[str], epochs: int, replicates: int = config.N_REPLICATES,
+                 windows: int = config.WALK_FORWARD_WINDOWS) -> None:
     import features as F
     import backtest as B
     import predict as P
 
     for symbol in symbols:
         df, feature_cols = P.prepare(symbol)
-        result = B.walk_forward(df, feature_cols, epochs=epochs, verbose=True)
+        result = B.walk_forward(df, feature_cols, epochs=epochs,
+                                replicates=replicates, n_windows=windows, verbose=True)
         m, b, l = result["model"], result["baseline"], result["baselineLinear"]
 
         print(f"\n=== {symbol} ===")
@@ -85,12 +104,7 @@ def cmd_backtest(symbols: list[str], epochs: int) -> None:
             print(f"{k:<20}{m[k]:>12.4f}{b[k]:>12.4f}{l[k]:>12.4f}")
         print(f"\npasses publication gate: {result['beatsBaseline']}  {result['gate']}")
 
-        out = config.REPORT_DIR / f"{symbol.upper()}_backtest.json"
-        out.write_text(json.dumps(
-            {k: v for k, v in result.items() if k != "sample"} | {"sample": result["sample"][-40:]},
-            indent=1, default=str,
-        ))
-        log.info("report -> %s", out)
+        log.info("report -> %s", _write_report(symbol, result))
 
 
 def cmd_leak_check(symbols: list[str], epochs: int) -> None:
@@ -114,7 +128,8 @@ def cmd_leak_check(symbols: list[str], epochs: int) -> None:
         print(f"  verdict: {'SUSPICIOUS - investigate leakage' if suspicious else 'OK - no leakage detected'}")
 
 
-def cmd_train(symbols: list[str], epochs: int, publish: bool, no_backtest: bool) -> None:
+def cmd_train(symbols: list[str], epochs: int, publish: bool, no_backtest: bool,
+              n_windows: int, replicates: int, batch_size: int) -> None:
     import predict as P
     import model as M
 
@@ -137,9 +152,17 @@ def cmd_train(symbols: list[str], epochs: int, publish: bool, no_backtest: bool)
             result = P.train_symbol(
                 symbol, epochs=epochs, run_backtest=not no_backtest,
                 base_model=base_model if i > 0 else None,
+                n_windows=n_windows, replicates=replicates,
+                batch_size=batch_size,
             )
             if i == 0:
                 base_model = result.get("model")
+
+            # Persist validation so export_onnx can bundle it. Without this
+            # the model would be exported with no metrics and would ship
+            # unvalidated.
+            if result.get("backtest"):
+                _write_report(symbol, result["backtest"])
 
             log.info("%s trained in %.0fs", symbol, time.time() - started)
 
@@ -200,6 +223,11 @@ def main() -> None:
     parser.add_argument("--symbols", nargs="+", help="symbols (default: config.SYMBOLS)")
     parser.add_argument("--symbol", help="a single symbol")
     parser.add_argument("--epochs", type=int, default=config.EPOCHS)
+    parser.add_argument("--replicates", type=int, default=config.N_REPLICATES,
+                        help="fits averaged per fold (reduces LSTM seed noise)")
+    parser.add_argument("--windows", type=int, default=config.WALK_FORWARD_WINDOWS)
+    parser.add_argument("--batch", type=int, default=config.BATCH_SIZE,
+                        help="batch size; the dominant cost when training on CPU")
     args = parser.parse_args()
 
     symbols = args.symbols or ([args.symbol] if args.symbol else config.SYMBOLS)
@@ -216,12 +244,16 @@ def main() -> None:
     if args.leak_check:
         cmd_leak_check(symbols, args.epochs)
     elif args.backtest:
-        cmd_backtest(symbols, args.epochs)
+        cmd_backtest(symbols, args.epochs, args.replicates, args.windows)
     elif args.full:
-        cmd_train(symbols, args.epochs, publish=True, no_backtest=args.no_backtest)
+        cmd_train(symbols, args.epochs, publish=True, no_backtest=args.no_backtest,
+                  n_windows=args.windows, replicates=args.replicates,
+                  batch_size=args.batch)
     else:
         if args.train:
-            cmd_train(symbols, args.epochs, publish=args.publish, no_backtest=args.no_backtest)
+            cmd_train(symbols, args.epochs, publish=args.publish, no_backtest=args.no_backtest,
+                      n_windows=args.windows, replicates=args.replicates,
+                  batch_size=args.batch)
         if args.predict:
             cmd_predict(symbols, publish=args.publish)
 

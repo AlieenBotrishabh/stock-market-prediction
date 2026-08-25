@@ -1,215 +1,350 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Brain, Search, BookOpen, ShieldCheck } from 'lucide-react';
+import {
+  Brain, BookOpen, ShieldCheck, TrendingUp, TrendingDown, RefreshCw,
+  Info, ArrowUpRight, Zap, EyeOff,
+} from 'lucide-react';
 import PageLayout from '../components/PageLayout';
 import PredictionCard from '../components/PredictionCard';
-import SearchBar from '../components/SearchBar';
 import MarketStatusBadge from '../components/MarketStatusBadge';
+import { SkeletonRows, ErrorState } from '../components/ui/States';
+import AnimatedNumber from '../components/ui/AnimatedNumber';
 import { getPredictions } from '../services/marketApi';
-import { formatPercent } from '../utils/formatting';
+import { formatPrice, formatPercent, formatRelativeTime } from '../utils/formatting';
 
 /**
- * Forecasts page.
+ * Forecasts.
  *
- * What this replaces: a page titled "AI Predictions … powered by real-time
- * data" whose numbers came from
+ * Every company with a model is evaluated in one request and shown at once,
+ * re-running live inference on a timer. Companies that did not clear
+ * validation are listed too, with their reason — "evaluated and did not
+ * qualify" is a different statement from "does not exist", and collapsing
+ * the two is how a page ends up implying coverage it does not have.
  *
+ * Replaces a page whose numbers came from a character-code sum of the
+ * ticker:
  *     const hash = symbol.split('').reduce((a,c) => a + c.charCodeAt(0), 0);
  *     const variation = ((hash % 100) / 100) * 4 - 2;
- *
- * — a character-code sum of the ticker. It returned the same value forever
- * for a given symbol, reported `dataPoints: 100` as a literal, and derived
- * its "confidence" from the magnitude of that same hash. Each click was
- * logged to a "Prediction History" table as though it were a fresh
- * inference.
- *
- * Every number here now comes from an LSTM trained offline on ten years of
- * daily bars, and PredictionCard refuses to render a figure at all unless
- * the model cleared its walk-forward baseline check.
  */
 
-const POPULAR = [
-  'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK',
-  'SBIN', 'WIPRO', 'LT', 'ITC', 'MARUTI',
-];
+const REFRESH_MS = 60_000;
+
+/** One company in the live grid. */
+const ForecastTile = ({ p, active, onSelect }) => {
+  const up = (p.predictedChangePercent ?? 0) >= 0;
+  return (
+    <motion.button
+      layout
+      onClick={() => onSelect(p.symbol)}
+      whileHover={{ y: -4 }}
+      whileTap={{ scale: 0.97 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+      aria-pressed={active}
+      className={`relative overflow-hidden text-left rounded-2xl p-4 border transition-colors ${
+        active
+          ? 'bg-white/[0.07] border-accent-blue/60'
+          : 'glass-effect border-white/10 hover:border-accent-blue/35'
+      }`}
+    >
+      {/* Direction wash */}
+      <div
+        className="absolute inset-0 opacity-[0.07] pointer-events-none"
+        style={{
+          background: `radial-gradient(120% 100% at 50% 100%, ${
+            up ? '#00d084' : '#ff4757'
+          } 0%, transparent 70%)`,
+        }}
+      />
+      <div className="relative">
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <span className="text-sm font-bold text-white truncate">{p.symbol}</span>
+          <span
+            className={`shrink-0 flex items-center gap-0.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full ${
+              up ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'
+            }`}
+          >
+            {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
+            {formatPercent(p.predictedChangePercent)}
+          </span>
+        </div>
+
+        <AnimatedNumber
+          value={p.predictedClose}
+          format={(v) => formatPrice(v)}
+          className="text-xl font-bold text-white block"
+        />
+        <p className="text-[11px] text-white/30 mt-0.5">from {formatPrice(p.basePrice)}</p>
+
+        <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between text-[10px]">
+          <span className="text-white/30">direction</span>
+          <span
+            className={
+              (p.directionAccuracy ?? 0) >= 52
+                ? 'text-accent-green font-semibold'
+                : 'text-white/60 font-semibold'
+            }
+          >
+            {p.directionAccuracy?.toFixed(1)}%
+          </span>
+        </div>
+      </div>
+    </motion.button>
+  );
+};
 
 const Predictions = () => {
   const navigate = useNavigate();
-  const [symbol, setSymbol] = useState('RELIANCE');
-  const [search, setSearch] = useState('');
-  const [available, setAvailable] = useState([]);
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+  const [symbol, setSymbol] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [showWithheld, setShowWithheld] = useState(false);
+  const mounted = useRef(true);
 
-  const loadAvailable = useCallback(async (signal) => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const load = useCallback(async ({ signal, quiet = false } = {}) => {
+    if (quiet) setRefreshing(true);
+    else setState((s) => ({ ...s, loading: true }));
     try {
-      setAvailable(await getPredictions({ signal }));
-    } catch {
-      setAvailable([]);
+      // Every company runs inference server-side, so allow a longer budget
+      // than the default client timeout.
+      const data = await getPredictions({ signal, timeout: 60_000 });
+      if (!mounted.current || signal?.aborted) return;
+      setState({ loading: false, data, error: null });
+      setLastUpdated(new Date().toISOString());
+      // Default to the strongest expected mover rather than a fixed ticker.
+      setSymbol((cur) => cur ?? data.served?.[0]?.symbol ?? null);
+    } catch (err) {
+      if (err.name === 'AbortError' || !mounted.current) return;
+      if (!quiet) setState({ loading: false, data: null, error: err });
+    } finally {
+      if (mounted.current) setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
     const c = new AbortController();
-    loadAvailable(c.signal);
+    load({ signal: c.signal });
     return () => c.abort();
-  }, [loadAvailable]);
+  }, [load]);
 
+  // Re-run inference on a timer, but only while the tab is visible.
   useEffect(() => {
-    const q = search.trim().toUpperCase();
-    if (q) setSymbol(q);
-  }, [search]);
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') load({ quiet: true });
+    }, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [load]);
 
-  const modelled = new Set(available.map((a) => a.symbol));
+  const served = state.data?.served ?? [];
+  const withheld = state.data?.withheld ?? [];
+  const total = state.data?.total ?? 0;
+
+  const HeaderRight = (
+    <div className="flex items-center gap-3">
+      {lastUpdated && (
+        <span className="text-[11px] text-white/30 hidden sm:inline">
+          updated {formatRelativeTime(lastUpdated)}
+        </span>
+      )}
+      <motion.button
+        whileTap={{ scale: 0.94 }}
+        whileHover={{ scale: 1.06 }}
+        onClick={() => load({ quiet: true })}
+        aria-label="Re-run inference"
+        className="p-2 rounded-lg glass-effect border border-white/10 text-white/50 hover:text-white transition-colors"
+      >
+        <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+      </motion.button>
+      <MarketStatusBadge compact />
+    </div>
+  );
 
   return (
     <PageLayout
       title="Price"
       accent="Forecasts"
-      subtitle="Next-day closing price from an LSTM trained on 10 years of daily data"
-      headerRight={<MarketStatusBadge />}
+      subtitle="Next-day close — inference runs live on every request"
+      headerRight={HeaderRight}
     >
-      {/* How it works — set expectations before showing any number */}
-      <div className="glass-effect rounded-2xl border border-white/10 p-5 mb-6">
-        <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-full bg-accent-blue/10 flex items-center justify-center shrink-0">
-            <BookOpen size={16} className="text-accent-blue" />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-white mb-1.5">How these forecasts work</h3>
-            <p className="text-white/45 text-sm leading-relaxed">
-              A single-layer LSTM (150 units) predicts the next day's log
-              return from twelve stationary features — denoised returns,
-              RSI, MACD, ATR, volume ratio, plus NIFTY and USD/INR context.
-              The architecture follows Bhandari et al. (2022); the feature
-              selection and walk-forward validation follow Hiransha et al.
-              (2018).
-            </p>
-            <p className="text-white/45 text-sm leading-relaxed mt-2">
-              A model is published <strong className="text-white/70">only if</strong> it
-              clears two bars in walk-forward backtesting: its error stays
-              within 2% of a naive &ldquo;tomorrow equals today&rdquo;
-              baseline, and it calls direction correctly at least 51% of
-              the time. Symbols without a qualifying model show nothing
-              rather than a guess.
-            </p>
-            <p className="text-white/35 text-xs leading-relaxed mt-2">
-              Why two bars: daily closes are close to a random walk, so
-              &ldquo;tomorrow equals today&rdquo; already scores about 1%
-              error and is very hard to beat on error alone. Direction
-              accuracy is where real skill shows up &mdash; 50% is a coin
-              flip. Both raw numbers appear on every forecast below, so you
-              can judge for yourself.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-3 mb-5 flex-wrap">
-        <SearchBar
-          onSearch={setSearch}
-          placeholder="Enter an NSE symbol, e.g. RELIANCE…"
-          className="flex-1 min-w-[240px]"
-        />
-        <span className="text-xs text-white/30 flex items-center gap-1.5">
-          <ShieldCheck size={13} className="text-accent-green" />
-          {available.length} model{available.length === 1 ? '' : 's'} published
-        </span>
-      </div>
-
-      <div className="flex flex-wrap gap-2 mb-8">
-        {POPULAR.map((sym) => (
-          <motion.button
-            key={sym}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => setSymbol(sym)}
-            aria-pressed={symbol === sym}
-            className={`relative px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              symbol === sym
-                ? 'bg-white text-black'
-                : 'glass-effect text-white/60 hover:text-white border border-white/10'
-            }`}
-          >
-            {sym}
-            {/* Dot marks symbols that actually have a published model */}
-            {modelled.has(sym) && (
-              <span
-                className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-accent-green"
-                title="Model available"
-              />
-            )}
-          </motion.button>
-        ))}
-      </div>
-
-      <AnimatePresence mode="wait">
+      {/* Summary band */}
+      {!state.loading && !state.error && (
         <motion.div
-          key={symbol}
-          initial={{ opacity: 0, y: 12 }}
+          initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.25 }}
+          className="grid grid-cols-3 gap-3 mb-6"
         >
-          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              <Brain size={18} className="text-accent-blue" /> {symbol}
-            </h2>
-            <button
-              onClick={() => navigate(`/stock/${symbol}`)}
-              className="text-sm text-accent-blue hover:underline"
-            >
-              View full details →
-            </button>
-          </div>
-          <PredictionCard symbol={symbol} />
+          {[
+            { label: 'Companies evaluated', value: total, color: 'text-accent-blue', Icon: Brain },
+            { label: 'Serving a forecast', value: served.length, color: 'text-accent-green', Icon: ShieldCheck },
+            { label: 'Withheld', value: withheld.length, color: 'text-white/50', Icon: EyeOff },
+          ].map(({ label, value, color, Icon }) => (
+            <div key={label} className="glass-effect rounded-2xl border border-white/10 p-4">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <Icon size={12} className={color} />
+                <p className="text-[10px] uppercase tracking-wider text-white/35 font-semibold truncate">
+                  {label}
+                </p>
+              </div>
+              <p className={`text-2xl font-bold tabular-nums ${color}`}>{value}</p>
+            </div>
+          ))}
         </motion.div>
-      </AnimatePresence>
-
-      {/* Everything with a live model */}
-      {available.length > 0 && (
-        <div className="mt-10">
-          <h3 className="text-sm font-semibold text-white/50 uppercase tracking-wider mb-4">
-            All published forecasts
-          </h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            {available.map((p) => {
-              const positive = (p.predictedChangePercent ?? 0) >= 0;
-              return (
-                <motion.button
-                  key={p.symbol}
-                  whileHover={{ y: -3 }}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={() => setSymbol(p.symbol)}
-                  className="glass-effect rounded-xl border border-white/10 hover:border-accent-blue/35 p-4 text-left transition-colors"
-                >
-                  <p className="text-sm font-bold text-white truncate">{p.symbol}</p>
-                  <p
-                    className={`text-lg font-bold tabular-nums mt-1 ${
-                      positive ? 'text-accent-green' : 'text-accent-red'
-                    }`}
-                  >
-                    {formatPercent(p.predictedChangePercent)}
-                  </p>
-                  <p className="text-[10px] text-white/25 mt-1 truncate">{p.direction}</p>
-                </motion.button>
-              );
-            })}
-          </div>
-        </div>
       )}
 
-      {available.length === 0 && (
-        <div className="mt-8 glass-effect rounded-2xl border border-white/10 p-5">
-          <p className="text-white/45 text-sm flex items-start gap-2.5">
-            <Search size={15} className="text-white/30 shrink-0 mt-0.5" />
-            <span>
-              No models are published yet. Run the training pipeline
-              (<code className="text-accent-blue text-xs">python main.py --full</code> in{' '}
-              <code className="text-accent-blue text-xs">ml-pipeline/</code>) and set{' '}
-              <code className="text-accent-blue text-xs">MONGODB_URI</code> so results
-              can be stored and served.
-            </span>
-          </p>
-        </div>
+      {state.loading ? (
+        <SkeletonRows count={4} height="h-24" />
+      ) : state.error ? (
+        <ErrorState error={state.error} onRetry={() => load()} />
+      ) : (
+        <>
+          {/* Live grid */}
+          {served.length > 0 && (
+            <div className="mb-8">
+              <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
+                <h3 className="text-sm font-semibold text-white/50 uppercase tracking-wider flex items-center gap-2">
+                  <Zap size={13} className="text-accent-green" /> Live forecasts
+                </h3>
+                <p className="text-[11px] text-white/30">
+                  largest expected move first · tap to inspect
+                </p>
+              </div>
+              <motion.div layout className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                {served.map((p) => (
+                  <ForecastTile
+                    key={p.symbol}
+                    p={p}
+                    active={p.symbol === symbol}
+                    onSelect={setSymbol}
+                  />
+                ))}
+              </motion.div>
+            </div>
+          )}
+
+          {/* Detail for the selected company */}
+          {/* Keyed remount rather than AnimatePresence: with mode="wait"
+              the exiting child's completion never fired here, so the
+              incoming one never mounted and the detail card stayed pinned
+              to whichever company loaded first while the tile highlight
+              moved. Changing `key` remounts the subtree, so `initial` ->
+              `animate` plays on every selection. */}
+          {symbol && (
+            <div>
+              <motion.div
+                key={symbol}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.25 }}
+                className="mb-8"
+              >
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+                  <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                    <Brain size={18} className="text-accent-blue" /> {symbol}
+                  </h2>
+                  <button
+                    onClick={() => navigate(`/stock/${symbol}`)}
+                    className="text-sm text-accent-blue hover:underline flex items-center gap-1"
+                  >
+                    Full details <ArrowUpRight size={14} />
+                  </button>
+                </div>
+                <PredictionCard symbol={symbol} />
+              </motion.div>
+            </div>
+          )}
+
+          {/* Withheld — surfaced, not hidden */}
+          {withheld.length > 0 && (
+            <div className="mb-8">
+              <button
+                onClick={() => setShowWithheld((v) => !v)}
+                aria-expanded={showWithheld}
+                className="w-full glass-effect rounded-2xl border border-white/10 hover:border-white/20 p-4 flex items-center justify-between gap-3 transition-colors"
+              >
+                <span className="flex items-center gap-2.5 text-left">
+                  <EyeOff size={15} className="text-white/40 shrink-0" />
+                  <span className="text-sm text-white/70">
+                    <strong className="text-white">{withheld.length}</strong> companies
+                    were evaluated but did not qualify
+                  </span>
+                </span>
+                <span className="text-xs text-accent-blue shrink-0">
+                  {showWithheld ? 'Hide' : 'Show reasons'}
+                </span>
+              </button>
+
+              <AnimatePresence>
+                {showWithheld && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.25 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+                      {withheld.map((w) => (
+                        <div key={w.symbol} className="glass-effect rounded-xl border border-white/5 p-3.5">
+                          <p className="text-sm font-bold text-white/70 mb-1">{w.symbol}</p>
+                          <p className="text-[11px] text-white/35 leading-relaxed">{w.reason}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* How it works */}
+          <div className="glass-effect rounded-2xl border border-white/10 p-5">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-accent-blue/10 flex items-center justify-center shrink-0">
+                <BookOpen size={16} className="text-accent-blue" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-white mb-1.5">
+                  How these forecasts work
+                </h3>
+                <p className="text-white/45 text-sm leading-relaxed">
+                  A two-layer LSTM reads the last 10 sessions and predicts the
+                  next day&rsquo;s log return from stationary features —
+                  denoised returns, RSI, MACD, ATR, volume ratio, plus NIFTY
+                  and USD/INR context. The model is exported to ONNX and
+                  executed on the server when you open this page, in about
+                  four milliseconds. Nothing is read from a precomputed batch.
+                </p>
+                <p className="text-white/45 text-sm leading-relaxed mt-2">
+                  One model serves every company. Training each separately was
+                  measured and performed <em>worse</em> — the shared model
+                  generalises better, which is the transfer result Hiransha
+                  et&nbsp;al. (2018) reported for NSE stocks. Every company is
+                  still validated on its own held-out sessions and passes or
+                  fails on its own numbers.
+                </p>
+                <p className="text-white/35 text-xs leading-relaxed mt-3 flex items-start gap-2">
+                  <Info size={12} className="shrink-0 mt-0.5" />
+                  <span>
+                    A company is shown only if its error stays within 2% of a
+                    naive &ldquo;tomorrow equals today&rdquo; baseline
+                    <strong className="text-white/55"> and </strong>
+                    it calls direction at least 51% of the time. Daily closes
+                    are close to a random walk, so the naive baseline already
+                    scores about 1% error — direction is where real skill
+                    shows, and 50% is a coin flip. Forecasts are for research,
+                    not investment advice.
+                  </span>
+                </p>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </PageLayout>
   );

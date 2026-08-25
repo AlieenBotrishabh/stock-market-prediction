@@ -1,0 +1,38 @@
+{
+ "symbol": "SBIN",
+ "modelVersion": "lstm-64x2-ts10-v2",
+ "architecture": "LSTM-64x2-ts10",
+ "inputName": "input_layer_3",
+ "outputName": "Identity:0",
+ "timeStep": 10,
+ "nFeatures": 8,
+ "features": [
+  "return_denoised",
+  "return_5d",
+  "volume_ratio",
+  "macd_rel",
+  "rsi14",
+  "atr_rel",
+  "nifty_return",
+  "usdinr_return"
+ ],
+ "targetMode": "return",
+ "horizonDays": 1,
+ "historyRange": "10y",
+ "denoiseLevel": 2,
+ "exportedAt": "2026-08-25T05:49:18.446648+00:00",
+ "parityVsKeras": 5.960464477539063e-08,
+ "inference": {
+  "steps": [
+   "Build the feature matrix in exactly the `features` order.",
+   "Take the last `timeStep` rows.",
+   "Scale: (raw - scaler.features.min) / scaler.features.range",
+   "Run the ONNX graph -> one scaled value.",
+   "Invert: raw = scaled * scaler.target.range + scaler.target.min",
+   "targetMode 'return' means that value is a LOG RETURN: predictedClose = lastClose * exp(value). targetMode 'price' means it is the close itself."
+  ]
+ },
+ "sharedModel": "_shared",
+ "transferredFrom": "RELIANCE",
+ "note": "Weights and scaler trained on RELIANCE, applied to SBIN. Validated separately on SBIN's own held-out sessions; see metrics.json."
+}

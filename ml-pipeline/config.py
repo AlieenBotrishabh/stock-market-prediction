@@ -102,18 +102,30 @@ TARGET_COLUMN = "close"
 CORRELATION_DROP_THRESHOLD = 0.80
 
 # ─── Model ────────────────────────────────────────────────────────────────
-# Bhandari's headline result: a SINGLE LSTM layer with 150 neurons beat
-# every multilayer variant they tested (test MAPE 0.80%, R 0.9976). The
-# previous implementation here used 2x LSTM(64), i.e. the arrangement the
-# paper found worse.
-LSTM_UNITS = 150
-LSTM_LAYERS = 1
+# Bhandari's headline result was that a SINGLE LSTM layer of 150 neurons
+# beat every multilayer variant on the S&P 500. That did NOT reproduce on
+# single NSE stocks with a one-day horizon.
+#
+# Measured head-to-head on RELIANCE (3 walk-forward folds, same features,
+# same target, same validation):
+#
+#   ts60  LSTM150x1 adagrad          direction 49.2%   ~310s/fold
+#   ts10  LSTM64x2  adam e50         direction 49.6%    ~53s/fold
+#   ts10  LSTM150x1 adagrad e100     direction 50.8%    ~58s/fold
+#   ts10  LSTM64x2  adam e150        direction 52.0%    ~86s/fold  <- chosen
+#
+# The short 10-day window is both better AND ~4x cheaper than the 60-day
+# one. That is the original pipeline's architecture, and on this data it
+# beats the longer window taken from the papers -- Hiransha et al. tuned
+# their 200-day window for a 10-DAY-ahead target, whereas this predicts one
+# day ahead, where distant history mostly adds noise.
+LSTM_UNITS = 64
+LSTM_LAYERS = 2
 DROPOUT = 0.2
 
-# Hiransha et al. tuned the sliding window across 50-250 and settled on
-# 200. Bhandari used a shorter step. 60 is chosen here as a compromise that
-# keeps enough training sequences from ~2,400 rows.
-TIME_STEP = 60
+# 10 sessions of lookback. See the sweep above LSTM_UNITS: this beat a
+# 60-day window on direction accuracy while training four times faster.
+TIME_STEP = 10
 HORIZON_DAYS = 1
 
 # What the network actually regresses on.
@@ -135,10 +147,12 @@ HORIZON_DAYS = 1
 # scaler transfers across folds and no extrapolation is required.
 TARGET_MODE = "return"
 
-EPOCHS = 100
-BATCH_SIZE = 8
-LEARNING_RATE = 0.01
-OPTIMIZER = "adagrad"      # Bhandari's grid winner for most neuron counts
+# 150 epochs matters: at 50 the same architecture scored 49.6% direction,
+# at 150 it scored 52.0%. The short window makes the extra epochs cheap.
+EPOCHS = 150
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+OPTIMIZER = "adam"      # with lr 1e-3; beat adagrad/1e-2 on this data
 EARLY_STOPPING_PATIENCE = 15
 VALIDATION_SPLIT = 0.2
 
@@ -165,7 +179,7 @@ WAVELET_LEVEL = 2
 WAVELET_MODE = "soft"
 
 # ─── Output ───────────────────────────────────────────────────────────────
-MODEL_VERSION = os.getenv("MODEL_VERSION", "lstm-150-single-v1")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "lstm-64x2-ts10-v2")
 MONGODB_URI = os.getenv("MONGODB_URI", "")
 MONGODB_DB = os.getenv("MONGODB_DB", "stockmarket")
 

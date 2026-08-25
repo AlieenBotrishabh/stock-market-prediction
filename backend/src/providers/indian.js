@@ -39,6 +39,23 @@ function client() {
   });
 }
 
+/**
+ * IndianAPI answers HTTP 200 with `{ error: "..." }` when one of its own
+ * upstreams fails (it proxies screener.in, which goes down independently).
+ * Treating that body as "no data" would render an empty section implying
+ * the company genuinely has no filings. Raise instead, so the caller can
+ * serve a cached copy or the UI can say the source is unavailable.
+ */
+function assertNotUpstreamError(data, what) {
+  if (data && !Array.isArray(data) && typeof data === 'object' && typeof data.error === 'string') {
+    const err = new Error(`IndianAPI could not fetch ${what}: ${data.error.slice(0, 160)}`);
+    err.code = 'UPSTREAM_PROVIDER_ERROR';
+    err.status = 502;
+    throw err;
+  }
+  return data;
+}
+
 const num = (v) => {
   if (v == null || v === '') return null;
   const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g, ''));
@@ -182,6 +199,7 @@ export async function getTrending() {
 export async function getNews(symbol) {
   const params = symbol ? { stock_name: symbol } : {};
   const { data } = await client().get('/news', { params });
+  assertNotUpstreamError(data, 'news');
   const arr = Array.isArray(data) ? data : data?.news ?? data?.data ?? [];
   return arr.map((n, i) => ({
     id: n.id ?? `${n.pub_date ?? ''}-${i}`,
@@ -284,6 +302,7 @@ export async function getRecentAnnouncements(symbol) {
   const { data } = await client().get('/recent_announcements', {
     params: { stock_name: symbol },
   });
+  assertNotUpstreamError(data, `recent announcements for ${symbol}`);
   const arr = Array.isArray(data) ? data : data?.data ?? [];
   return arr.map((a, i) => ({
     id: `${symbol}-${i}`,
@@ -303,6 +322,7 @@ export async function getCorporateActions(symbol) {
   const { data } = await client().get('/corporate_actions', {
     params: { stock_name: symbol },
   });
+  assertNotUpstreamError(data, `corporate actions for ${symbol}`);
 
   const toRows = (section) => {
     if (!section || !Array.isArray(section.header) || !Array.isArray(section.data)) return [];

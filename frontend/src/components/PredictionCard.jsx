@@ -15,6 +15,11 @@ import {
 /**
  * Model forecast, presented honestly.
  *
+ * Inference is LIVE: the API executes an exported ONNX graph when this
+ * request arrives (~4 ms), against the latest available sessions. There is
+ * no nightly batch, so the number is current by construction and there is
+ * no staleness badge to show.
+ *
  * The contract this component enforces:
  *   - `isModelBacked === false` renders an explanation, never a number.
  *   - When a number IS shown it always appears with its confidence
@@ -158,9 +163,16 @@ const PredictionCard = ({ symbol, showBacktest = true }) => {
           Next-Day Forecast
         </h3>
         <div className="flex items-center gap-2 flex-wrap">
-          {p.isStale && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-accent-amber bg-accent-amber/10 border border-accent-amber/25 px-2 py-0.5 rounded-full">
-              <AlertTriangle size={10} /> {p.ageHours}h old
+          <span className="inline-flex items-center gap-1.5 text-[11px] text-accent-green bg-accent-green/10 border border-accent-green/25 px-2 py-0.5 rounded-full">
+            <span className="relative flex w-1.5 h-1.5">
+              <span className="absolute inline-flex w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse-ring motion-reduce:animate-none" />
+              <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-accent-green" />
+            </span>
+            Live inference
+          </span>
+          {p.model?.source?.startsWith('huggingface') && (
+            <span className="text-[11px] text-white/30" title={p.model.source}>
+              🤗 {p.model.source.split(':')[1]}
             </span>
           )}
           <span className="text-[11px] text-white/30 font-mono">{p.model?.version}</span>
@@ -200,9 +212,11 @@ const PredictionCard = ({ symbol, showBacktest = true }) => {
             </div>
           )}
 
-          <p className="text-[11px] text-white/30 mt-3 flex items-center gap-1.5">
+          <p className="text-[11px] text-white/30 mt-3 flex items-center gap-1.5 flex-wrap">
             <Clock size={11} />
-            from {formatPrice(p.basePrice)} · generated {formatRelativeTime(p.generatedAt)}
+            from the {p.baseDate ?? 'latest'} close of {formatPrice(p.basePrice)}
+            <span className="text-white/20">·</span>
+            computed {formatRelativeTime(p.generatedAt)}
           </p>
         </div>
 

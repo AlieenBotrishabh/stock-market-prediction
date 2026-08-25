@@ -18,3 +18,13 @@ tensorflow>=2.13.0
 pymongo>=4.6.0
 
 python-dotenv>=1.0.0
+
+# ONNX export, so the model can run inside the Node API at request time
+# instead of only in a batch job. TensorFlow cannot fit in a Vercel
+# function (~600MB vs a 250MB limit); the exported graph is ~390KB.
+onnx>=1.16
+tf2onnx>=1.17
+onnxruntime>=1.17          # used to verify the export matches Keras
+
+# Publishing bundles to the Hugging Face Hub
+huggingface_hub>=0.23

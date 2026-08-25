@@ -155,7 +155,12 @@ export const getIndicators = (symbol, { series = false, range = '2y', ...opts } 
 export const getPrediction = (symbol, opts) =>
   data(`/predict/${encodeURIComponent(symbol)}`, opts);
 
-/** Every symbol that currently has a usable model. */
+/**
+ * Live forecasts for every company with a bundle.
+ * @returns {Promise<{served:object[], withheld:{symbol,reason}[], total:number}>}
+ *   `withheld` companies were evaluated and did not qualify — distinct
+ *   from having no model at all.
+ */
 export const getPredictions = (opts) => data('/predictions', opts);
 
 // ─── Movers ──────────────────────────────────────────────────────────────

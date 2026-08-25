@@ -48,6 +48,25 @@ export function toDisplaySymbol(symbol) {
   return String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/, '');
 }
 
+/** IST is a fixed +05:30 with no DST, so a plain offset is exact. */
+const IST_OFFSET_SECONDS = 19_800;
+
+/**
+ * Label a bar by its date in IST.
+ *
+ * Not the UTC date. For NSE equities the two agree (the session runs
+ * 03:45-10:00 UTC), but instruments on other exchanges do not: USDINR=X is
+ * quoted on Europe/London, and labelling its bars by UTC date shifted the
+ * whole series one day relative to the Python pipeline, which normalises
+ * to Asia/Kolkata. That silently mis-joined the macro features onto the
+ * stock's trading days.
+ */
+function toIstDate(epochSeconds) {
+  return new Date((epochSeconds + IST_OFFSET_SECONDS) * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -215,7 +234,7 @@ export async function getHistory(symbol, { range = '1y', interval = '1d' } = {})
     if (q.close?.[i] == null) continue;
     candles.push({
       t: timestamps[i] * 1000,
-      date: new Date(timestamps[i] * 1000).toISOString().slice(0, 10),
+      date: toIstDate(timestamps[i]),
       o: q.open?.[i] ?? null,
       h: q.high?.[i] ?? null,
       l: q.low?.[i] ?? null,

@@ -150,16 +150,20 @@ const IpoPage = () => {
                   </span>
                 </div>
 
+                {/* Only fields that are meaningful for this stage. An
+                    upcoming IPO has no issue or listing price yet — showing
+                    those as em-dashes made the page look like it had failed
+                    to load rather than like the data does not exist yet. */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  <Field
-                    label="Price Band"
-                    value={
-                      ipo.priceMin != null && ipo.priceMax != null
-                        ? `${formatPrice(ipo.priceMin)} – ${formatPrice(ipo.priceMax)}`
-                        : ipo.issuePrice != null ? formatPrice(ipo.issuePrice) : DASH
-                    }
-                  />
-                  <Field label="Issue Price" value={formatPrice(ipo.issuePrice)} />
+                  {(ipo.priceMin != null && ipo.priceMax != null) && (
+                    <Field
+                      label="Price Band"
+                      value={`${formatPrice(ipo.priceMin)} – ${formatPrice(ipo.priceMax)}`}
+                    />
+                  )}
+                  {ipo.issuePrice != null && (
+                    <Field label="Issue Price" value={formatPrice(ipo.issuePrice)} />
+                  )}
                   {ipo.listingPrice != null && (
                     <Field label="Listed At" value={formatPrice(ipo.listingPrice)} />
                   )}
@@ -169,6 +173,11 @@ const IpoPage = () => {
                       value={formatPercent(ipo.listingGains)}
                       className={gainsPositive ? 'text-accent-green' : 'text-accent-red'}
                     />
+                  )}
+                  {ipo.priceMin == null && ipo.issuePrice == null && (
+                    <p className="col-span-full text-sm text-white/35">
+                      Price band not announced yet.
+                    </p>
                   )}
                 </div>
 
