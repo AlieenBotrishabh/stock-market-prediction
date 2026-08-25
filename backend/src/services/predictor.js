@@ -31,8 +31,44 @@ import { getMarketStatus, istParts } from './marketStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** Local export directory produced by ml-pipeline/export_onnx.py. */
-const LOCAL_EXPORT_DIR = path.resolve(__dirname, '../../../ml-pipeline/export');
+/**
+ * Where the committed model bundles live.
+ *
+ * Resolved against several candidates rather than one relative path.
+ * Locally this file sits at backend/src/services/, so ../../../ reaches the
+ * repo root — but inside a bundled Vercel function the layout differs and
+ * `__dirname` is not where you would expect, so a single hardcoded hop
+ * silently finds nothing and every company reports "no model published".
+ * The first candidate that actually contains a bundle wins.
+ */
+const EXPORT_CANDIDATES = [
+  process.env.MODEL_BUNDLE_DIR,
+  path.resolve(__dirname, '../../../ml-pipeline/export'),
+  path.resolve(process.cwd(), 'ml-pipeline/export'),
+  path.resolve(process.cwd(), '../ml-pipeline/export'),
+  // Vercel copies includeFiles under the task root.
+  path.resolve('/var/task', 'ml-pipeline/export'),
+].filter(Boolean);
+
+let resolvedExportDir = null;
+
+/** First candidate directory that actually holds bundles. */
+async function getExportDir() {
+  if (resolvedExportDir !== null) return resolvedExportDir;
+  for (const dir of EXPORT_CANDIDATES) {
+    try {
+      const entries = await fs.readdir(dir);
+      if (entries.length) {
+        resolvedExportDir = dir;
+        return dir;
+      }
+    } catch { /* try the next candidate */ }
+  }
+  // Cache the miss as a string so we do not re-stat on every request, but
+  // keep it falsy-checkable.
+  resolvedExportDir = '';
+  return '';
+}
 
 /** Hugging Face repo holding the published bundles. */
 const HF_REPO = process.env.HF_MODEL_REPO || 'Ace6868/stock-price-prediction-lstm';
@@ -100,8 +136,11 @@ async function fetchFromHub(symbol, file, destDir) {
  * not already present.
  */
 async function resolveBundleDir(symbol) {
-  const local = path.join(LOCAL_EXPORT_DIR, symbol);
-  if (await exists(path.join(local, 'config.json'))) return local;
+  const exportDir = await getExportDir();
+  if (exportDir) {
+    const local = path.join(exportDir, symbol);
+    if (await exists(path.join(local, 'config.json'))) return local;
+  }
 
   const cached = path.join(CACHE_DIR, symbol);
   if (await exists(path.join(cached, 'config.json'))) return cached;
@@ -178,12 +217,14 @@ async function loadModel(symbol) {
 /** Symbols with a usable bundle in the local export directory. */
 async function listLocalBundles() {
   try {
-    const entries = await fs.readdir(LOCAL_EXPORT_DIR, { withFileTypes: true });
+    const exportDir = await getExportDir();
+    if (!exportDir) return [];
+    const entries = await fs.readdir(exportDir, { withFileTypes: true });
     const found = [];
     for (const e of entries) {
       // Skip the shared-weights directory; it is not a company.
       if (e.name.startsWith('_')) continue;
-      if (e.isDirectory() && await exists(path.join(LOCAL_EXPORT_DIR, e.name, 'config.json'))) {
+      if (e.isDirectory() && await exists(path.join(exportDir, e.name, 'config.json'))) {
         found.push(e.name.toUpperCase());
       }
     }
@@ -469,7 +510,7 @@ export async function predict(symbol) {
       trainedAt: config.exportedAt,
       features: config.features,
       timeStep,
-      source: bundle.dir.startsWith(CACHE_DIR) ? `huggingface:${HF_REPO}` : 'local',
+      source: bundle.dir.startsWith(CACHE_DIR) ? `huggingface:${HF_REPO}` : 'bundled',
     },
     backtest: metrics
       ? {
