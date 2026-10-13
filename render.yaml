@@ -1,25 +1,8 @@
 # Render Blueprint: https://render.com/docs/blueprint-spec
-# Deploys the Node/Express API and the Flask LSTM prediction service.
+# Deploys the Node/Express API (free plan).
+# The Flask LSTM service runs on a free Hugging Face Space (see ml-pipeline/deploy_space.py).
 
 services:
-  # Flask + TensorFlow LSTM service (models are downloaded from the Hugging Face Hub)
-  - type: web
-    name: stockpulse-ml
-    runtime: python
-    rootDir: ml-pipeline
-    plan: free          # ~440 MB RAM in use; switch to a larger plan if it runs out of memory
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
-    healthCheckPath: /health
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: HF_REPO_ID
-        value: Ace6868/stock-price-prediction-lstm
-      - key: HF_TOKEN       # only needed if the Hugging Face repo is private
-        sync: false
-
-  # Node/Express backend
   - type: web
     name: stockpulse-backend
     runtime: node
@@ -37,5 +20,5 @@ services:
         sync: false
       - key: INDIAN_API_BASE_URL
         value: https://stock.indianapi.in
-      - key: ML_SERVICE_URL # public URL of the stockpulse-ml service above
-        value: https://stockpulse-ml.onrender.com
+      - key: ML_SERVICE_URL # Hugging Face Space running ml-pipeline/app.py
+        value: https://ace6868-stockpulse-ml.hf.space

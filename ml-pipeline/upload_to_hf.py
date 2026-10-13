@@ -2,7 +2,7 @@
 Upload trained models (models/*.keras + models/*.json) to the Hugging Face Hub.
 
 Log in once before running:
-    huggingface-cli login        (or set HF_TOKEN in .env)
+    hf auth login        (or set HF_TOKEN in .env)
 """
 
 import os

@@ -1,3 +1,13 @@
+---
+title: StockPulse ML
+emoji: 📈
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # ML Pipeline – LSTM Stock Prediction
 
 Predicts the next day's closing price of NSE stocks with an LSTM. The model uses
@@ -37,8 +47,9 @@ Each stock produces `models/{SYMBOL}.keras` (the LSTM) and `models/{SYMBOL}.json
 ## 2. Upload to Hugging Face
 
 ```bash
-huggingface-cli login           # or set HF_TOKEN in .env
-python upload_to_hf.py
+hf auth login                   # or set HF_TOKEN in .env
+python upload_to_hf.py          # models  -> huggingface.co/Ace6868/stock-price-prediction-lstm
+python deploy_space.py          # Flask API -> free Docker Space (https://ace6868-stockpulse-ml.hf.space)
 ```
 
 ## 3. Run the API

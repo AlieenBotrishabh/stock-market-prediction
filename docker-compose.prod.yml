@@ -68,6 +68,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      PORT: 8000
       HF_REPO_ID: ${HF_REPO_ID:-Ace6868/stock-price-prediction-lstm}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
