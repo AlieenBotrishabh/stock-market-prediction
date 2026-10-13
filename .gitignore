@@ -47,3 +47,9 @@ yarn-error.log*
 .temp/
 tmp/
 *.tmp
+
+# Python / ML
+__pycache__/
+*.pyc
+ml-pipeline/.env
+ml-pipeline/models/

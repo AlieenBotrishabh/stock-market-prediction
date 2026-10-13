@@ -33,12 +33,11 @@ services:
       PORT: 5000
       NODE_ENV: production
       INDIANAPI_KEY: ${INDIANAPI_KEY}
+      ML_SERVICE_URL: http://ml-pipeline:8000
       FRONTEND_URL: ${FRONTEND_URL:-https://yourdomain.com}
     depends_on:
       mongodb:
         condition: service_healthy
-    volumes:
-      - ./ml-pipeline:/app/../ml-pipeline
     networks:
       - stock-network-prod
     restart: always
@@ -66,16 +65,17 @@ services:
   ml-pipeline:
     build: ./ml-pipeline
     container_name: stock-market-ml-prod
+    ports:
+      - "8000:8000"
     environment:
-      INDIANAPI_KEY: ${INDIANAPI_KEY}
+      HF_REPO_ID: ${HF_REPO_ID:-Ace6868/stock-price-prediction-lstm}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ./ml-pipeline/data:/app/data
       - ./ml-pipeline/models:/app/models
     networks:
       - stock-network-prod
-    restart: on-failure
-    profiles:
-      - ml
+    restart: always
 
 volumes:
   mongodb_prod_data:
